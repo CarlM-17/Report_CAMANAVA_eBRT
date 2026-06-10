@@ -331,7 +331,7 @@ const html = `<!DOCTYPE html>
     <select id="areaFilter"><option value="">All Areas</option></select>
     <label>Store</label>
     <select id="storeFilter"><option value="">All Stores</option></select>
-    <button class="btn-refresh" id="refreshBtn" onclick="loadData()">↻ Apply / Refresh</button>
+    <button class="btn-refresh" id="refreshBtn" onclick="loadData()">↻ Refresh</button>
   </div>
 
   <div id="statusBar" class="status-bar loading">
@@ -549,7 +549,7 @@ const html = `<!DOCTYPE html>
       statusBar.innerHTML = '❌ Error: ' + err.message;
     } finally {
       btn.classList.remove('loading');
-      btn.textContent = '↻ Apply / Refresh';
+      btn.textContent = '↻ Refresh';
     }
   }
 
@@ -569,8 +569,10 @@ const html = `<!DOCTYPE html>
       allStores = f.stores;
       populateStoreDropdown();
 
-      // When area changes, narrow store list (independent: still shows all if no area)
-      areaSel.addEventListener('change', populateStoreDropdown);
+      // Auto-apply filters on any change
+      monthSel.addEventListener('change', loadData);
+      areaSel.addEventListener('change', () => { populateStoreDropdown(); loadData(); });
+      document.getElementById('storeFilter').addEventListener('change', loadData);
     } catch (e) {
       console.error('Filter load failed', e);
     }
