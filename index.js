@@ -29,7 +29,8 @@ function parseCSV(text) {
 
 // Helper: fetch and parse a sheet by name
 async function fetchSheet(sheetName) {
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(sheetName)}`;
+  // Use gviz endpoint with sheet param — more reliable for targeting specific tabs
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Sheet "${sheetName}" fetch failed: ${response.status}`);
   const text = await response.text();
@@ -77,12 +78,10 @@ app.get('/api/data', async (req, res) => {
     const totalSalesMetrics = buildMetrics(sCur, sYA, tCur, tYA);
 
     // ===== ShopperMetricsData: TNAP, KAIN, PERKS, PAG-IBIG =====
-    // Auto-detect column indices from header row
-    const shopperHeaders = shopperRows[0].map(h => (h || '').trim().toUpperCase());
-    const colIdx = (name) => {
-      const idx = shopperHeaders.indexOf(name.toUpperCase());
-      return idx;
-    };
+    // Auto-detect column indices from header row (flexible matching)
+    const normalize = s => (s || '').trim().toUpperCase().replace(/[\s._-]/g, '');
+    const shopperHeadersNorm = shopperRows[0].map(normalize);
+    const colIdx = (name) => shopperHeadersNorm.indexOf(normalize(name));
 
     const typeCol     = colIdx('TYPE');
     const salesCol    = colIdx('Sales');
