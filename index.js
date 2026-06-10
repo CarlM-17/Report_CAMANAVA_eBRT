@@ -87,10 +87,12 @@ app.get('/api/data', async (req, res) => {
     const { area, storeId, month } = req.query;
 
     // Fetch all sheets in parallel
-    const [salesRows, shopperRows, storeRows] = await Promise.all([
+    const [salesRows, shopperRows, storeRows, aparRows, gegRows] = await Promise.all([
       fetchSheet(SHEET_NAME),
       fetchSheet('ShopperMetricsData'),
-      fetchSheet('ListOfStores')
+      fetchSheet('ListOfStores'),
+      fetchSheet('APAR'),
+      fetchSheet('GEG')
     ]);
 
     // Build a Store ID → Area lookup map (from ListOfStores)
@@ -171,6 +173,48 @@ app.get('/api/data', async (req, res) => {
     const perksMetrics   = sumByType('PERKS');
     const pagibigMetrics = sumByType('PAG-IBIG');
 
+    // ===== APAR sheet =====
+    // A=0 Month, C=2 Store ID, G=6 Sales, H=7 Sales YA, I=8 Trx, J=9 Trx YA
+    const aparData = aparRows.slice(1);
+    let aSalesCur = 0, aSalesYA = 0, aTrxCur = 0, aTrxYA = 0;
+    aparData.forEach(cols => {
+      const rowMonth   = cols[0];
+      const rowStoreId = (cols[2] || '').trim();
+      if (!matchMonth(rowMonth)) return;
+      if (!matchStoreId(rowStoreId)) return;
+      if (!matchArea(rowStoreId)) return;
+      aSalesCur += num(cols[6]);
+      aSalesYA  += num(cols[7]);
+      aTrxCur   += num(cols[8]);
+      aTrxYA    += num(cols[9]);
+    });
+    const aparMetrics = buildMetrics(aSalesCur, aSalesYA, aTrxCur, aTrxYA);
+
+    // ===== GEG sheet (Gold, Elite, Green) =====
+    // A=0 Month, C=2 Store ID, E=4 Customer Level, F=5 Sales, G=6 Sales YA, H=7 TRX, I=8 TRX LY
+    const gegData = gegRows.slice(1);
+    function sumGEG(levelFilter) {
+      let sCur = 0, sYA = 0, trxCur = 0, trxYA = 0;
+      gegData.forEach(cols => {
+        const level = (cols[4] || '').trim().toUpperCase();
+        if (level !== levelFilter.toUpperCase()) return;
+        const rowMonth   = cols[0];
+        const rowStoreId = (cols[2] || '').trim();
+        if (!matchMonth(rowMonth)) return;
+        if (!matchStoreId(rowStoreId)) return;
+        if (!matchArea(rowStoreId)) return;
+        sCur   += num(cols[5]);
+        sYA    += num(cols[6]);
+        trxCur += num(cols[7]);
+        trxYA  += num(cols[8]);
+      });
+      return buildMetrics(sCur, sYA, trxCur, trxYA);
+    }
+
+    const goldMetrics  = sumGEG('Gold');
+    const eliteMetrics = sumGEG('Elite');
+    const greenMetrics = sumGEG('Green');
+
     res.json({
       ok: true,
       rowCount: validRows,
@@ -179,7 +223,11 @@ app.get('/api/data', async (req, res) => {
       tnap: tnapMetrics,
       kain: kainMetrics,
       perks: perksMetrics,
-      pagibig: pagibigMetrics
+      pagibig: pagibigMetrics,
+      apar: aparMetrics,
+      gold: goldMetrics,
+      elite: eliteMetrics,
+      green: greenMetrics
     });
 
   } catch (err) {
@@ -464,6 +512,8 @@ const html = `<!DOCTYPE html>
   function buildTable(d) {
     // Total TNAP = TNAP + KAIN combined
     const totalTnap = buildCombined(d.tnap, d.kain);
+    // Total GEG = Gold + Elite + Green
+    const totalGEG = buildCombined(buildCombined(d.gold, d.elite), d.green);
 
     const tb = document.getElementById('tableBody');
     tb.innerHTML = \`
@@ -474,13 +524,13 @@ const html = `<!DOCTYPE html>
       \${metricsRow('KAIN', d.kain)}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Loyalty Segments</td></tr>
-      \${emptyRow('APAR')}
+      \${metricsRow('APAR', d.apar)}
       \${emptyRow('TOP 200')}
       \${emptyRow('Balance TNAP')}
-      \${emptyRow('Gold')}
-      \${emptyRow('Elite')}
-      \${emptyRow('Green')}
-      \${emptyRow('Total GEG')}
+      \${metricsRow('Gold', d.gold)}
+      \${metricsRow('Elite', d.elite)}
+      \${metricsRow('Green', d.green)}
+      \${metricsRow('Total GEG', totalGEG)}
       \${metricsRow('PERKS', d.perks)}
       \${metricsRow('PAG-IBIG', d.pagibig)}
       <tr class="group-divider"><td colspan="15"></td></tr>
