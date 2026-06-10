@@ -12,8 +12,10 @@ app.get('/api/data', async (req, res) => {
     const response = await fetch(url);
     const text = await response.text();
 
-    // Strip the JSONP wrapper: google.visualization.Query.setResponse({...});
-    const jsonStr = text.replace(/^.*?setResponse\(/, '').replace(/\);?\s*$/, '');
+    // Strip the JSONP wrapper and any JS comments before parsing
+    let jsonStr = text.replace(/^.*?setResponse\(/, '').replace(/\);?\s*$/, '');
+    // Remove JS block comments /*...*/ which Google sometimes includes
+    jsonStr = jsonStr.replace(/\/\*[\s\S]*?\*\//g, '');
     const parsed = JSON.parse(jsonStr);
 
     const rows = parsed.table.rows;
