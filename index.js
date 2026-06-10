@@ -5,20 +5,44 @@ const PORT = process.env.PORT || 3000;
 const SHEET_ID = '1b7-04u_kq491RTzjJdT_DlJhL4oWIiKah9rJbqdHAZg';
 const SHEET_NAME = 'SalesData';
 
-// Fetch and parse public Google Sheet via gviz endpoint
+// Parse CSV text into array of rows (handles commas inside quotes)
+function parseCSV(text) {
+  const lines = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') { inQuotes = !inQuotes; continue; }
+    if (ch === '\n' && !inQuotes) { lines.push(current); current = ''; continue; }
+    if (ch === '\r' && !inQuotes) continue;
+    current += ch;
+  }
+  if (current.trim()) lines.push(current);
+  return lines.map(line => {
+    const cols = [];
+    let val = '';
+    let q = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '"') { q = !q; continue; }
+      if (line[i] === ',' && !q) { cols.push(val); val = ''; continue; }
+      val += line[i];
+    }
+    cols.push(val);
+    return cols;
+  });
+}
+
+// Fetch and parse public Google Sheet via CSV export
 app.get('/api/data', async (req, res) => {
   try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(SHEET_NAME)}`;
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
     const response = await fetch(url);
+    if (!response.ok) throw new Error('Sheet fetch failed: ' + response.status);
     const text = await response.text();
+    const allRows = parseCSV(text);
 
-    // Strip the JSONP wrapper and any JS comments before parsing
-    let jsonStr = text.replace(/^.*?setResponse\(/, '').replace(/\);?\s*$/, '');
-    // Remove JS block comments /*...*/ which Google sometimes includes
-    jsonStr = jsonStr.replace(/\/\*[\s\S]*?\*\//g, '');
-    const parsed = JSON.parse(jsonStr);
-
-    const rows = parsed.table.rows;
+    // First row is header, skip it
+    const dataRows = allRows.slice(1);
 
     // Column index map (0-based):
     // A=0 MONTH, B=1 REGION, C=2 AREA, D=3 STORE ID, E=4 STORE NAME
@@ -27,42 +51,39 @@ app.get('/api/data', async (req, res) => {
     // L=11 SALES PER SQM
     // M=12 TRX COUNT MTD, N=13 BASKETSIZE MTD
     // O=14 TRX COUNT MTD YA, P=15 BASKETSIZE MTD YA
-    // ... and so on
 
-    const getVal = (row, idx) => {
-      const cell = row.c[idx];
-      if (!cell || cell.v === null || cell.v === undefined) return 0;
-      return typeof cell.v === 'number' ? cell.v : parseFloat(cell.v) || 0;
+    const num = (val) => {
+      if (!val || val.trim() === '') return 0;
+      return parseFloat(val.replace(/,/g, '')) || 0;
     };
 
-    // Sum up all rows for each column
     let salesCurrent = 0, salesYA = 0;
     let trxCurrent = 0, trxYA = 0;
     let basketCurrent = 0, basketYA = 0;
-
     let validRows = 0;
 
-    rows.forEach(row => {
-      if (!row.c || !row.c[5]) return; // skip empty rows
-      salesCurrent  += getVal(row, 5);   // F - SALES MTD
-      salesYA       += getVal(row, 6);   // G - SALES MTD YA
-      trxCurrent    += getVal(row, 12);  // M - TRX COUNT MTD
-      trxYA         += getVal(row, 14);  // O - TRX COUNT MTD YA
-      basketCurrent += getVal(row, 13);  // N - BASKETSIZE MTD
-      basketYA      += getVal(row, 15);  // P - BASKETSIZE MTD YA
+    dataRows.forEach(cols => {
+      if (!cols[5] || cols[5].trim() === '') return; // skip empty rows
+      salesCurrent  += num(cols[5]);   // F - SALES MTD
+      salesYA       += num(cols[6]);   // G - SALES MTD YA
+      trxCurrent    += num(cols[12]);  // M - TRX COUNT MTD
+      trxYA         += num(cols[14]);  // O - TRX COUNT MTD YA
+      basketCurrent += num(cols[13]);  // N - BASKETSIZE MTD
+      basketYA      += num(cols[15]);  // P - BASKETSIZE MTD YA
       validRows++;
     });
 
-    // Basket size is an average, not a sum
+    // Basket size is average, not sum
     const avgBasketCurrent = validRows > 0 ? basketCurrent / validRows : 0;
     const avgBasketYA      = validRows > 0 ? basketYA / validRows : 0;
 
-    const diffPct  = (cur, ya) => ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
-    const diffVal  = (cur, ya) => cur - ya;
+    const diffPct = (cur, ya) => ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+    const diffVal = (cur, ya) => cur - ya;
 
     res.json({
       ok: true,
       rowCount: validRows,
+      headers: allRows[0],
       totalSales: {
         current:  salesCurrent,
         yearAgo:  salesYA,
