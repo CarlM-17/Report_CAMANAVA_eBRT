@@ -114,30 +114,22 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
-// Debug endpoint: check raw column headers and first 2 data rows
+// Debug endpoint: check raw column headers and sample rows
 app.get('/api/debug', async (req, res) => {
   try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
-    const response = await fetch(url);
-    const text = await response.text();
-    const allRows = parseCSV(text);
-    const headers = allRows[0].map((h, i) => `[${i}] ${h}`);
-    const sample = allRows.slice(1, 3).map(r => r.map((v, i) => `[${i}] ${v}`));
-    res.json({ headers, sampleRows: sample, totalColumns: allRows[0].length, totalRows: allRows.length - 1 });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    const salesAllRows = await fetchSheet(SHEET_NAME);
+    const salesHeaders = salesAllRows[0].map((h, i) => `[${i}] ${h}`);
+    const salesSample = salesAllRows.slice(1, 3).map(r => r.map((v, i) => `[${i}] ${v}`));
 
-// Debug endpoint for ShopperMetricsData
-app.get('/api/debug-shopper', async (req, res) => {
-  try {
-    const allRows = await fetchSheet('ShopperMetricsData');
-    const headers = allRows[0].map((h, i) => `[${i}] ${h}`);
-    const sample = allRows.slice(1, 4).map(r => r.map((v, i) => `[${i}] ${v}`));
-    // Get unique TYPE values from col A
-    const types = [...new Set(allRows.slice(1).map(r => (r[0] || '').trim()))];
-    res.json({ headers, sampleRows: sample, uniqueTypes: types, totalColumns: allRows[0].length, totalRows: allRows.length - 1 });
+    const shopperAllRows = await fetchSheet('ShopperMetricsData');
+    const shopperHeaders = shopperAllRows[0].map((h, i) => `[${i}] ${h}`);
+    const shopperSample = shopperAllRows.slice(1, 4).map(r => r.map((v, i) => `[${i}] ${v}`));
+    const uniqueTypes = [...new Set(shopperAllRows.slice(1).map(r => (r[0] || '').trim()))];
+
+    res.json({
+      salesData: { headers: salesHeaders, sampleRows: salesSample, totalRows: salesAllRows.length - 1 },
+      shopperMetrics: { headers: shopperHeaders, sampleRows: shopperSample, uniqueTypes, totalRows: shopperAllRows.length - 1 }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
