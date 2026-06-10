@@ -56,40 +56,90 @@ function buildMetrics(salesCur, salesYA, trxCur, trxYA) {
   };
 }
 
-app.get('/api/data', async (req, res) => {
+// Endpoint: dropdown filter options (Area, Stores, Months)
+app.get('/api/filters', async (req, res) => {
   try {
-    // Fetch both sheets in parallel
-    const [salesRows, shopperRows] = await Promise.all([
-      fetchSheet(SHEET_NAME),
-      fetchSheet('ShopperMetricsData')
+    const [stores, months] = await Promise.all([
+      fetchSheet('ListOfStores'),
+      fetchSheet('MonthFilter')
     ]);
 
+    // ListOfStores - B=Region, C=Area, D=Store ID, E=Store Name
+    const storeRows = stores.slice(1).filter(r => r[3] && r[3].trim() !== '');
+    const areas = [...new Set(storeRows.map(r => (r[2] || '').trim()).filter(Boolean))].sort();
+    const storeList = storeRows.map(r => ({
+      area:    (r[2] || '').trim(),
+      storeId: (r[3] || '').trim(),
+      name:    (r[4] || '').trim()
+    }));
+
+    // MonthFilter - col A
+    const monthList = months.slice(1).map(r => (r[0] || '').trim()).filter(Boolean);
+
+    res.json({ ok: true, areas, stores: storeList, months: monthList });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/data', async (req, res) => {
+  try {
+    const { area, storeId, month } = req.query;
+
+    // Fetch all sheets in parallel
+    const [salesRows, shopperRows, storeRows] = await Promise.all([
+      fetchSheet(SHEET_NAME),
+      fetchSheet('ShopperMetricsData'),
+      fetchSheet('ListOfStores')
+    ]);
+
+    // Build a Store ID → Area lookup map (from ListOfStores)
+    const storeAreaMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      const ar  = (r[2] || '').trim();
+      if (sid) storeAreaMap[sid] = ar;
+    });
+
+    // Filter helpers
+    const matchArea    = (storeId) => !area || (storeAreaMap[storeId] || '').toLowerCase() === area.toLowerCase();
+    const matchStore   = (storeId) => !storeId || true; // (placeholder, used below differently)
+    const matchMonth   = (m) => !month || (m || '').trim().toLowerCase() === month.toLowerCase();
+    const matchStoreId = (sid) => !storeId || (sid || '').trim() === storeId.trim();
+
     // ===== SalesData: Total Sales =====
-    const salesData = salesRows.slice(1); // skip header
+    // SalesData cols: A=0 MONTH, D=3 STORE ID, F=5 SALES MTD, G=6 SALES MTD YA, M=12 TRX MTD, O=14 TRX MTD YA
+    const salesData = salesRows.slice(1);
     let sCur = 0, sYA = 0, tCur = 0, tYA = 0, validRows = 0;
     salesData.forEach(cols => {
       if (!cols[5] || cols[5].trim() === '') return;
-      sCur += num(cols[5]);   // F - SALES MTD
-      sYA  += num(cols[6]);   // G - SALES MTD YA
-      tCur += num(cols[12]);  // M - TRX COUNT MTD
-      tYA  += num(cols[14]);  // O - TRX COUNT MTD YA
+      const rowMonth   = cols[0];
+      const rowStoreId = (cols[3] || '').trim();
+      if (!matchMonth(rowMonth)) return;
+      if (!matchStoreId(rowStoreId)) return;
+      if (!matchArea(rowStoreId)) return;
+      sCur += num(cols[5]);
+      sYA  += num(cols[6]);
+      tCur += num(cols[12]);
+      tYA  += num(cols[14]);
       validRows++;
     });
     const totalSalesMetrics = buildMetrics(sCur, sYA, tCur, tYA);
 
     // ===== ShopperMetricsData: TNAP, KAIN, PERKS, PAG-IBIG =====
-    // Auto-detect column indices from header row (flexible matching)
     const normalize = s => (s || '').trim().toUpperCase().replace(/[\s._-]/g, '');
     const shopperHeadersNorm = shopperRows[0].map(normalize);
     const colIdx = (name) => shopperHeadersNorm.indexOf(normalize(name));
 
     const typeCol     = colIdx('TYPE');
+    const monthCol    = colIdx('Month');    // E in your reference
+    const storeIdCol  = colIdx('STOREID');  // C
     const salesCol    = colIdx('Sales');
     const salesLYCol  = colIdx('SalesLY');
     const trxCol      = colIdx('TRXCount');
     const trxLYCol    = colIdx('TRXCountLY');
 
-    const shopperData = shopperRows.slice(1); // skip header
+    const shopperData = shopperRows.slice(1);
 
     function sumByType(typeFilter) {
       let salesCur = 0, salesYA = 0, trxCur = 0, trxYA = 0, matchCount = 0;
@@ -97,11 +147,19 @@ app.get('/api/data', async (req, res) => {
         if (typeCol < 0) return;
         const type = (cols[typeCol] || '').trim().toUpperCase();
         if (type !== typeFilter.toUpperCase()) return;
+
+        // Apply filters
+        const rowMonth   = monthCol   >= 0 ? cols[monthCol]   : '';
+        const rowStoreId = storeIdCol >= 0 ? (cols[storeIdCol] || '').trim() : '';
+        if (!matchMonth(rowMonth)) return;
+        if (!matchStoreId(rowStoreId)) return;
+        if (!matchArea(rowStoreId)) return;
+
         matchCount++;
-        if (salesCol >= 0)   salesCur += num(cols[salesCol]);
+        if (salesCol   >= 0) salesCur += num(cols[salesCol]);
         if (salesLYCol >= 0) salesYA  += num(cols[salesLYCol]);
-        if (trxCol >= 0)     trxCur   += num(cols[trxCol]);
-        if (trxLYCol >= 0)   trxYA    += num(cols[trxLYCol]);
+        if (trxCol     >= 0) trxCur   += num(cols[trxCol]);
+        if (trxLYCol   >= 0) trxYA    += num(cols[trxLYCol]);
       });
       const m = buildMetrics(salesCur, salesYA, trxCur, trxYA);
       m.matchCount = matchCount;
@@ -113,23 +171,15 @@ app.get('/api/data', async (req, res) => {
     const perksMetrics   = sumByType('PERKS');
     const pagibigMetrics = sumByType('PAG-IBIG');
 
-    // Diagnostics
-    const uniqueTypes = typeCol >= 0 ? [...new Set(shopperData.map(r => (r[typeCol] || '').trim()))] : ['TYPE COL NOT FOUND'];
-
     res.json({
       ok: true,
       rowCount: validRows,
+      filters: { area: area || null, storeId: storeId || null, month: month || null },
       totalSales: totalSalesMetrics,
       tnap: tnapMetrics,
       kain: kainMetrics,
       perks: perksMetrics,
-      pagibig: pagibigMetrics,
-      _debug: {
-        shopperTotalRows: shopperData.length,
-        uniqueTypes,
-        detectedColumns: { typeCol, salesCol, salesLYCol, trxCol, trxLYCol },
-        rawHeaders: shopperRows[0]
-      }
+      pagibig: pagibigMetrics
     });
 
   } catch (err) {
@@ -275,17 +325,13 @@ const html = `<!DOCTYPE html>
 <div id="tab-daily" class="content">
 
   <div class="filter-bar">
-    <label>Date</label>
-    <input type="date" id="reportDate"/>
-    <label>Sub-Area</label>
-    <select id="subAreaFilter">
-      <option value="">All Sub-Areas</option>
-      <option>North Caloocan</option>
-      <option>South Caloocan</option>
-      <option>Malabon & Navotas</option>
-      <option>Valenzuela</option>
-    </select>
-    <button class="btn-refresh" id="refreshBtn" onclick="loadData()">↻ Refresh Data</button>
+    <label>Month</label>
+    <select id="monthFilter"><option value="">All Months</option></select>
+    <label>Area</label>
+    <select id="areaFilter"><option value="">All Areas</option></select>
+    <label>Store</label>
+    <select id="storeFilter"><option value="">All Stores</option></select>
+    <button class="btn-refresh" id="refreshBtn" onclick="loadData()">↻ Apply / Refresh</button>
   </div>
 
   <div id="statusBar" class="status-bar loading">
@@ -334,7 +380,9 @@ const html = `<!DOCTYPE html>
   const today = new Date();
   document.getElementById('currentDate').textContent =
     today.toLocaleDateString('en-PH', { weekday:'short', year:'numeric', month:'short', day:'numeric' });
-  document.getElementById('reportDate').value = today.toISOString().split('T')[0];
+
+  // Cache full store list for client-side filtering
+  let allStores = [];
 
   function switchTab(btn, tabId) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -469,7 +517,16 @@ const html = `<!DOCTYPE html>
     statusBar.innerHTML = '<span class="spinner"></span> Fetching data from Google Sheets...';
 
     try {
-      const res = await fetch('/api/data');
+      // Build query string from filters
+      const month   = document.getElementById('monthFilter').value;
+      const area    = document.getElementById('areaFilter').value;
+      const storeId = document.getElementById('storeFilter').value;
+      const params  = new URLSearchParams();
+      if (month)   params.set('month', month);
+      if (area)    params.set('area', area);
+      if (storeId) params.set('storeId', storeId);
+
+      const res = await fetch('/api/data?' + params.toString());
       const data = await res.json();
 
       if (!data.ok) throw new Error(data.error || 'Unknown error');
@@ -477,23 +534,67 @@ const html = `<!DOCTYPE html>
       buildTable(data);
 
       statusBar.className = 'status-bar';
-      const dbg = data._debug || {};
-      const cols = dbg.detectedColumns || {};
-      statusBar.innerHTML = \`✅ Sales: \${data.rowCount} rows · Shopper: \${dbg.shopperTotalRows || 0} rows · Types: \${(dbg.uniqueTypes || []).join(', ')} · TNAP: \${data.tnap.matchCount || 0} · Cols: TYPE=\${cols.typeCol} Sales=\${cols.salesCol} TRX=\${cols.trxCol}\`;
+      const f = data.filters || {};
+      const filterTxt = [
+        f.month   ? 'Month: ' + f.month     : null,
+        f.area    ? 'Area: ' + f.area       : null,
+        f.storeId ? 'Store: ' + f.storeId   : null
+      ].filter(Boolean).join(' · ') || 'No filters';
+      statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
       document.getElementById('footerText').textContent =
-        \`CAMANAVA Region · Data Source: Google Sheets · \${data.rowCount} stores loaded\`;
+        \`CAMANAVA Region · Data Source: Google Sheets · \${data.rowCount} rows matched\`;
 
     } catch (err) {
       statusBar.className = 'status-bar error';
       statusBar.innerHTML = '❌ Error: ' + err.message;
     } finally {
       btn.classList.remove('loading');
-      btn.textContent = '↻ Refresh Data';
+      btn.textContent = '↻ Apply / Refresh';
     }
   }
 
+  // Load filter dropdowns from /api/filters
+  async function loadFilters() {
+    try {
+      const res = await fetch('/api/filters');
+      const f = await res.json();
+      if (!f.ok) return;
+
+      const monthSel = document.getElementById('monthFilter');
+      f.months.forEach(m => monthSel.innerHTML += \`<option value="\${m}">\${m}</option>\`);
+
+      const areaSel = document.getElementById('areaFilter');
+      f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+
+      allStores = f.stores;
+      populateStoreDropdown();
+
+      // When area changes, narrow store list (independent: still shows all if no area)
+      areaSel.addEventListener('change', populateStoreDropdown);
+    } catch (e) {
+      console.error('Filter load failed', e);
+    }
+  }
+
+  function populateStoreDropdown() {
+    const areaSel  = document.getElementById('areaFilter').value;
+    const storeSel = document.getElementById('storeFilter');
+    const prev     = storeSel.value;
+    storeSel.innerHTML = '<option value="">All Stores</option>';
+    const filtered = areaSel
+      ? allStores.filter(s => s.area.toLowerCase() === areaSel.toLowerCase())
+      : allStores;
+    filtered.forEach(s => {
+      storeSel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} · \${s.name}</option>\`;
+    });
+    storeSel.value = prev; // preserve selection if still valid
+  }
+
   // Auto-load on page open
-  loadData();
+  (async () => {
+    await loadFilters();
+    loadData();
+  })();
 </script>
 </body>
 </html>`;
