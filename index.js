@@ -54,7 +54,6 @@ app.get('/api/data', async (req, res) => {
 
     let salesCurrent = 0, salesYA = 0;
     let trxCurrent = 0, trxYA = 0;
-    let basketCurrent = 0, basketYA = 0;
     let validRows = 0;
 
     dataRows.forEach(cols => {
@@ -63,14 +62,12 @@ app.get('/api/data', async (req, res) => {
       salesYA       += num(cols[6]);   // G - SALES MTD YA
       trxCurrent    += num(cols[12]);  // M - TRX COUNT MTD
       trxYA         += num(cols[14]);  // O - TRX COUNT MTD YA
-      basketCurrent += num(cols[13]);  // N - BASKETSIZE MTD
-      basketYA      += num(cols[15]);  // P - BASKETSIZE MTD YA
       validRows++;
     });
 
-    // Basket size is average, not sum
-    const avgBasketCurrent = validRows > 0 ? basketCurrent / validRows : 0;
-    const avgBasketYA      = validRows > 0 ? basketYA / validRows : 0;
+    // Basket Size = Total Sales / Total Transaction Count
+    const bskCurrent = trxCurrent !== 0 ? salesCurrent / trxCurrent : 0;
+    const bskYA      = trxYA !== 0 ? salesYA / trxYA : 0;
 
     const diffPct = (cur, ya) => ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
     const diffVal = (cur, ya) => cur - ya;
@@ -92,10 +89,10 @@ app.get('/api/data', async (req, res) => {
         diffVal:  diffVal(trxCurrent, trxYA)
       },
       basketSize: {
-        current:  avgBasketCurrent,
-        yearAgo:  avgBasketYA,
-        diffPct:  diffPct(avgBasketCurrent, avgBasketYA),
-        diffVal:  diffVal(avgBasketCurrent, avgBasketYA)
+        current:  bskCurrent,
+        yearAgo:  bskYA,
+        diffPct:  diffPct(bskCurrent, bskYA),
+        diffVal:  diffVal(bskCurrent, bskYA)
       }
     });
 
