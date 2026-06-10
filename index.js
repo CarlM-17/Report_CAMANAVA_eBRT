@@ -87,12 +87,13 @@ app.get('/api/data', async (req, res) => {
     const { area, storeId, month } = req.query;
 
     // Fetch all sheets in parallel
-    const [salesRows, shopperRows, storeRows, aparRows, gegRows] = await Promise.all([
+    const [salesRows, shopperRows, storeRows, aparRows, gegRows, top200Rows] = await Promise.all([
       fetchSheet(SHEET_NAME),
       fetchSheet('ShopperMetricsData'),
       fetchSheet('ListOfStores'),
       fetchSheet('APAR'),
-      fetchSheet('GEG')
+      fetchSheet('GEG'),
+      fetchSheet('Top200')
     ]);
 
     // Build a Store ID → Area lookup map (from ListOfStores)
@@ -215,6 +216,59 @@ app.get('/api/data', async (req, res) => {
     const eliteMetrics = sumGEG('Elite');
     const greenMetrics = sumGEG('Green');
 
+    // ===== Top200 sheet =====
+    // Layout per row:
+    // Col indices: A=0 Region, B=1 Area, C=2 StoreID, D=3 StoreName, E=4 NoAccts, F=5 Tier
+    // G-R = 6-17: Jan_YA, Feb_YA, ... Dec_YA (12 months)
+    // W-AH = 22-33: Jan_Current, Feb_Current, ... Dec_Current
+    // Sales data rows: rows 2-25 → array indices 1-24
+    // TRX data rows: rows 33-60 → array indices 32-59
+    const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const YA_COL_START  = 6;   // Jan_YA = col G
+    const CUR_COL_START = 22;  // Jan_Current = col W
+
+    function sumTop200Section(rows, startIdx, endIdx) {
+      let cur = 0, ya = 0;
+      for (let i = startIdx; i <= endIdx && i < rows.length; i++) {
+        const r = rows[i];
+        if (!r || !r[2]) continue; // skip if no Store ID
+        const rowStoreId = (r[2] || '').trim();
+        if (!matchStoreId(rowStoreId)) continue;
+        if (!matchArea(rowStoreId)) continue;
+
+        // Determine which months to include
+        let monthIndices;
+        if (month) {
+          // Month filter set — only that one month
+          const mIdx = MONTHS.findIndex(m => m.toLowerCase() === month.toLowerCase());
+          if (mIdx < 0) continue;
+          monthIndices = [mIdx];
+        } else {
+          // No filter — include all months where Current has data
+          monthIndices = [];
+          for (let m = 0; m < 12; m++) {
+            const curVal = (r[CUR_COL_START + m] || '').toString().trim();
+            if (curVal !== '' && !isNaN(parseFloat(curVal.replace(/,/g, '')))) {
+              monthIndices.push(m);
+            }
+          }
+        }
+
+        monthIndices.forEach(m => {
+          cur += num(r[CUR_COL_START + m]);
+          ya  += num(r[YA_COL_START + m]);
+        });
+      }
+      return { cur, ya };
+    }
+
+    // Sales: rows 2-25 → indices 1-24
+    const top200Sales = sumTop200Section(top200Rows, 1, 24);
+    // TRX: rows 33-60 → indices 32-59
+    const top200Trx   = sumTop200Section(top200Rows, 32, 59);
+
+    const top200Metrics = buildMetrics(top200Sales.cur, top200Sales.ya, top200Trx.cur, top200Trx.ya);
+
     res.json({
       ok: true,
       rowCount: validRows,
@@ -227,7 +281,8 @@ app.get('/api/data', async (req, res) => {
       apar: aparMetrics,
       gold: goldMetrics,
       elite: eliteMetrics,
-      green: greenMetrics
+      green: greenMetrics,
+      top200: top200Metrics
     });
 
   } catch (err) {
@@ -285,22 +340,22 @@ const html = `<!DOCTYPE html>
   .tab-btn:hover { color: white; background: rgba(255,255,255,0.08); }
   .tab-btn.active { color: white; border-bottom: 3px solid #A5D6A7; background: rgba(255,255,255,0.1); }
 
-  .content { padding: 20px 24px; }
+  .content { padding: 14px 16px; }
 
   .filter-bar {
-    background: white; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px;
-    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: white; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
   }
-  .filter-bar label { font-size: 12px; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
+  .filter-bar label { font-size: 11px; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
   .filter-bar select, .filter-bar input {
-    border: 1px solid #ccc; border-radius: 5px; padding: 6px 10px;
-    font-size: 13px; color: #333; background: #fafafa;
+    border: 1px solid #ccc; border-radius: 5px; padding: 5px 8px;
+    font-size: 12px; color: #333; background: #fafafa;
   }
   .filter-bar select:focus, .filter-bar input:focus { outline: none; border-color: #2E7D32; }
   .btn-refresh {
     margin-left: auto; background: #1B5E20; color: white; border: none;
-    border-radius: 5px; padding: 7px 18px; font-size: 13px; font-weight: 600;
+    border-radius: 5px; padding: 6px 14px; font-size: 12px; font-weight: 600;
     cursor: pointer; transition: background 0.2s; display: flex; align-items: center; gap: 6px;
   }
   .btn-refresh:hover { background: #2E7D32; }
@@ -317,22 +372,22 @@ const html = `<!DOCTYPE html>
   .table-card { background: white; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow: hidden; }
   .table-wrapper { overflow-x: auto; }
 
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
 
   .section-header td {
-    background: #1B5E20; color: white; font-weight: 700; font-size: 12px;
-    letter-spacing: 1px; text-align: center; padding: 8px 10px; text-transform: uppercase;
+    background: #1B5E20; color: white; font-weight: 700; font-size: 11px;
+    letter-spacing: 0.5px; text-align: center; padding: 6px 4px; text-transform: uppercase;
   }
   .col-header td {
-    background: #f5f5f5; color: #444; font-weight: 700; font-size: 11px;
-    text-align: center; padding: 7px 10px; border-bottom: 2px solid #ddd;
-    text-transform: uppercase; letter-spacing: 0.3px;
+    background: #f5f5f5; color: #444; font-weight: 700; font-size: 10px;
+    text-align: center; padding: 5px 4px; border-bottom: 2px solid #ddd;
+    text-transform: uppercase; letter-spacing: 0.2px;
   }
-  .col-header td.metrics-col { text-align: left; color: #1B5E20; }
+  .col-header td.metrics-col { text-align: left; color: #1B5E20; padding-left: 8px; }
 
-  tbody tr td { padding: 7px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
-  tbody tr td.metrics-col { font-weight: 600; color: #333; text-align: left; white-space: nowrap; min-width: 160px; }
-  tbody tr td.data-col { text-align: right; color: #555; font-variant-numeric: tabular-nums; min-width: 90px; }
+  tbody tr td { padding: 5px 4px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+  tbody tr td.metrics-col { font-weight: 600; color: #333; text-align: left; white-space: nowrap; padding-left: 8px; font-size: 11.5px; }
+  tbody tr td.data-col { text-align: right; color: #555; font-variant-numeric: tabular-nums; padding-right: 6px; }
   tbody tr td.diff-pos { color: #2E7D32; font-weight: 700; }
   tbody tr td.diff-neg { color: #C62828; font-weight: 700; }
 
@@ -389,9 +444,16 @@ const html = `<!DOCTYPE html>
   <div class="table-card">
     <div class="table-wrapper">
       <table>
+        <colgroup>
+          <col style="width:11%"/>
+          <col/><col/><col style="width:5.5%"/><col/>
+          <col/><col/><col style="width:5.5%"/><col/>
+          <col/><col/><col style="width:5.5%"/><col/>
+          <col/><col/>
+        </colgroup>
         <thead>
           <tr class="section-header">
-            <td rowspan="2" style="text-align:left; width:160px;">Metrics</td>
+            <td rowspan="2" style="text-align:left;">Metrics</td>
             <td colspan="4">SALES</td>
             <td colspan="4" class="sec-div">TRANSACTION COUNT</td>
             <td colspan="4" class="sec-div">BASKET SIZE</td>
@@ -525,7 +587,7 @@ const html = `<!DOCTYPE html>
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Loyalty Segments</td></tr>
       \${metricsRow('APAR', d.apar)}
-      \${emptyRow('TOP 200')}
+      \${metricsRow('TOP 200', d.top200)}
       \${emptyRow('Balance TNAP')}
       \${metricsRow('Gold', d.gold)}
       \${metricsRow('Elite', d.elite)}
