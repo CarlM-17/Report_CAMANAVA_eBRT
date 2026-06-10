@@ -129,6 +129,20 @@ app.get('/api/debug', async (req, res) => {
   }
 });
 
+// Debug endpoint for ShopperMetricsData
+app.get('/api/debug-shopper', async (req, res) => {
+  try {
+    const allRows = await fetchSheet('ShopperMetricsData');
+    const headers = allRows[0].map((h, i) => `[${i}] ${h}`);
+    const sample = allRows.slice(1, 4).map(r => r.map((v, i) => `[${i}] ${v}`));
+    // Get unique TYPE values from col A
+    const types = [...new Set(allRows.slice(1).map(r => (r[0] || '').trim()))];
+    res.json({ headers, sampleRows: sample, uniqueTypes: types, totalColumns: allRows[0].length, totalRows: allRows.length - 1 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
