@@ -203,6 +203,14 @@ const html = `<!DOCTYPE html>
     text-transform: uppercase; padding: 10px 10px 4px; background: #fafafa; border-bottom: none;
   }
   .empty-cell { color: #ccc; font-size: 11px; text-align: center !important; }
+
+  /* Section separator lines */
+  table td:nth-child(2), table th:nth-child(2) { border-left: 2px solid #1B5E20; }
+  table td:nth-child(6), table th:nth-child(6) { border-left: 2px solid #1B5E20; }
+  table td:nth-child(10), table th:nth-child(10) { border-left: 2px solid #1B5E20; }
+  table td:nth-child(14), table th:nth-child(14) { border-left: 2px solid #1B5E20; }
+  .section-header .sec-div { border-left: 2px solid rgba(255,255,255,0.4); }
+  .col-header .sec-div { border-left: 2px solid #1B5E20; }
   .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #ccc; border-top-color: #1B5E20; border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .footer { text-align: center; padding: 16px; font-size: 11px; color: #aaa; }
@@ -249,15 +257,15 @@ const html = `<!DOCTYPE html>
           <tr class="section-header">
             <td rowspan="2" style="text-align:left; width:160px;">Metrics</td>
             <td colspan="4">SALES</td>
-            <td colspan="4">TRANSACTION COUNT</td>
-            <td colspan="4">BASKET SIZE</td>
-            <td colspan="2">SOB</td>
+            <td colspan="4" class="sec-div">TRANSACTION COUNT</td>
+            <td colspan="4" class="sec-div">BASKET SIZE</td>
+            <td colspan="2" class="sec-div">SOB</td>
           </tr>
           <tr class="col-header">
             <td>Current</td><td>Year Ago</td><td>Diff %</td><td>Diff Val</td>
-            <td>Current</td><td>Year Ago</td><td>Diff %</td><td>Diff Val</td>
-            <td>Current</td><td>Year Ago</td><td>Diff %</td><td>Diff Val</td>
-            <td>Current</td><td>Year Ago</td>
+            <td class="sec-div">Current</td><td>Year Ago</td><td>Diff %</td><td>Diff Val</td>
+            <td class="sec-div">Current</td><td>Year Ago</td><td>Diff %</td><td>Diff Val</td>
+            <td class="sec-div">Current</td><td>Year Ago</td>
           </tr>
         </thead>
         <tbody id="tableBody">
