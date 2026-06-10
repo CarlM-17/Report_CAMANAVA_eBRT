@@ -5,31 +5,26 @@ const PORT = process.env.PORT || 3000;
 const SHEET_ID = '1b7-04u_kq491RTzjJdT_DlJhL4oWIiKah9rJbqdHAZg';
 const SHEET_NAME = 'SalesData';
 
-// Parse CSV text into array of rows (handles commas inside quotes)
+// Parse CSV properly - handles commas inside quoted values (like large numbers)
 function parseCSV(text) {
-  const lines = [];
-  let current = '';
+  const rows = [];
+  let row = [];
+  let val = '';
   let inQuotes = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-    if (ch === '"') { inQuotes = !inQuotes; continue; }
-    if (ch === '\n' && !inQuotes) { lines.push(current); current = ''; continue; }
-    if (ch === '\r' && !inQuotes) continue;
-    current += ch;
-  }
-  if (current.trim()) lines.push(current);
-  return lines.map(line => {
-    const cols = [];
-    let val = '';
-    let q = false;
-    for (let i = 0; i < line.length; i++) {
-      if (line[i] === '"') { q = !q; continue; }
-      if (line[i] === ',' && !q) { cols.push(val); val = ''; continue; }
-      val += line[i];
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') { val += '"'; i++; } // escaped quote
+      else { inQuotes = !inQuotes; }
+      continue;
     }
-    cols.push(val);
-    return cols;
-  });
+    if (ch === ',' && !inQuotes) { row.push(val); val = ''; continue; }
+    if (ch === '\n' && !inQuotes) { row.push(val); rows.push(row); row = []; val = ''; continue; }
+    if (ch === '\r' && !inQuotes) continue;
+    val += ch;
+  }
+  if (val || row.length) { row.push(val); rows.push(row); }
+  return rows;
 }
 
 // Fetch and parse public Google Sheet via CSV export
@@ -107,6 +102,21 @@ app.get('/api/data', async (req, res) => {
   } catch (err) {
     console.error('Fetch error:', err);
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Debug endpoint: check raw column headers and first 2 data rows
+app.get('/api/debug', async (req, res) => {
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
+    const response = await fetch(url);
+    const text = await response.text();
+    const allRows = parseCSV(text);
+    const headers = allRows[0].map((h, i) => `[${i}] ${h}`);
+    const sample = allRows.slice(1, 3).map(r => r.map((v, i) => `[${i}] ${v}`));
+    res.json({ headers, sampleRows: sample, totalColumns: allRows[0].length, totalRows: allRows.length - 1 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
