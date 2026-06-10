@@ -244,11 +244,11 @@ app.get('/api/data', async (req, res) => {
           if (mIdx < 0) continue;
           monthIndices = [mIdx];
         } else {
-          // No filter — include all months where Current has data
+          // No filter — include only months where Current has a non-zero value
           monthIndices = [];
           for (let m = 0; m < 12; m++) {
-            const curVal = (r[CUR_COL_START + m] || '').toString().trim();
-            if (curVal !== '' && !isNaN(parseFloat(curVal.replace(/,/g, '')))) {
+            const curVal = num(r[CUR_COL_START + m]);
+            if (curVal > 0) {
               monthIndices.push(m);
             }
           }
@@ -262,10 +262,10 @@ app.get('/api/data', async (req, res) => {
       return { cur, ya };
     }
 
-    // Sales: rows 2-25 → indices 1-24
-    const top200Sales = sumTop200Section(top200Rows, 1, 24);
-    // TRX: rows 33-60 → indices 32-59
-    const top200Trx   = sumTop200Section(top200Rows, 32, 59);
+    // Sales: rows 2-22 → array indices 1-21
+    const top200Sales = sumTop200Section(top200Rows, 1, 21);
+    // TRX: rows 34-53 (row 33 is header, skip) → array indices 33-52
+    const top200Trx   = sumTop200Section(top200Rows, 33, 52);
 
     const top200Metrics = buildMetrics(top200Sales.cur, top200Sales.ya, top200Trx.cur, top200Trx.ya);
 
