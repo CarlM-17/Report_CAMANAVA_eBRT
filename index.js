@@ -217,40 +217,53 @@ app.get('/api/data', async (req, res) => {
     const greenMetrics = sumGEG('Green');
 
     // ===== Top200 sheet =====
-    // Layout per row:
-    // Col indices: A=0 Region, B=1 Area, C=2 StoreID, D=3 StoreName, E=4 NoAccts, F=5 Tier
-    // G-R = 6-17: Jan_YA, Feb_YA, ... Dec_YA (12 months)
+    // Auto-detect sales and TRX sections by finding the header rows.
+    // The sheet has TWO sections with identical column structure:
+    //   - Sales (top section) - first header
+    //   - Transaction Count (bottom section) - second header
+    // Column layout per row:
+    // A=0 Region, B=1 Area, C=2 StoreID, D=3 StoreName, E=4 NoAccts, F=5 Tier
+    // G-R = 6-17: Jan_YA, Feb_YA, ... Dec_YA
     // W-AH = 22-33: Jan_Current, Feb_Current, ... Dec_Current
-    // Sales data rows: rows 2-25 → array indices 1-24
-    // TRX data rows: rows 33-60 → array indices 32-59
     const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    const YA_COL_START  = 6;   // Jan_YA = col G
-    const CUR_COL_START = 22;  // Jan_Current = col W
+    const YA_COL_START  = 6;
+    const CUR_COL_START = 22;
+
+    // Find indices of header rows (rows where col C == "STOREID")
+    const headerIndices = [];
+    top200Rows.forEach((r, i) => {
+      const c = (r[2] || '').toString().trim().toUpperCase();
+      if (c === 'STOREID' || c === 'STORE ID' || c === 'STORE_ID') headerIndices.push(i);
+    });
+
+    // Section 1 (Sales) = rows after headerIndices[0] until headerIndices[1] (or end)
+    // Section 2 (TRX) = rows after headerIndices[1] until end
+    const salesStart = (headerIndices[0] || 0) + 1;
+    const salesEnd   = headerIndices[1] ? headerIndices[1] - 1 : top200Rows.length - 1;
+    const trxStart   = headerIndices[1] ? headerIndices[1] + 1 : -1;
+    const trxEnd     = top200Rows.length - 1;
 
     function sumTop200Section(rows, startIdx, endIdx) {
-      let cur = 0, ya = 0;
+      let cur = 0, ya = 0, rowCount = 0;
+      if (startIdx < 0) return { cur, ya, rowCount };
       for (let i = startIdx; i <= endIdx && i < rows.length; i++) {
         const r = rows[i];
-        if (!r || !r[2]) continue; // skip if no Store ID
+        if (!r || !r[2]) continue;
         const rowStoreId = (r[2] || '').trim();
+        // Skip header-looking rows that might appear inside data
+        if (rowStoreId.toUpperCase() === 'STOREID') continue;
         if (!matchStoreId(rowStoreId)) continue;
         if (!matchArea(rowStoreId)) continue;
 
-        // Determine which months to include
         let monthIndices;
         if (month) {
-          // Month filter set — only that one month
           const mIdx = MONTHS.findIndex(m => m.toLowerCase() === month.toLowerCase());
           if (mIdx < 0) continue;
           monthIndices = [mIdx];
         } else {
-          // No filter — include only months where Current has a non-zero value
           monthIndices = [];
           for (let m = 0; m < 12; m++) {
-            const curVal = num(r[CUR_COL_START + m]);
-            if (curVal > 0) {
-              monthIndices.push(m);
-            }
+            if (num(r[CUR_COL_START + m]) > 0) monthIndices.push(m);
           }
         }
 
@@ -258,14 +271,13 @@ app.get('/api/data', async (req, res) => {
           cur += num(r[CUR_COL_START + m]);
           ya  += num(r[YA_COL_START + m]);
         });
+        rowCount++;
       }
-      return { cur, ya };
+      return { cur, ya, rowCount };
     }
 
-    // Sales: rows 2-22 → array indices 1-21
-    const top200Sales = sumTop200Section(top200Rows, 1, 21);
-    // TRX: rows 34-53 (row 33 is header, skip) → array indices 33-52
-    const top200Trx   = sumTop200Section(top200Rows, 33, 52);
+    const top200Sales = sumTop200Section(top200Rows, salesStart, salesEnd);
+    const top200Trx   = sumTop200Section(top200Rows, trxStart, trxEnd);
 
     const top200Metrics = buildMetrics(top200Sales.cur, top200Sales.ya, top200Trx.cur, top200Trx.ya);
 
@@ -282,7 +294,14 @@ app.get('/api/data', async (req, res) => {
       gold: goldMetrics,
       elite: eliteMetrics,
       green: greenMetrics,
-      top200: top200Metrics
+      top200: top200Metrics,
+      _top200Debug: {
+        headerIndices,
+        salesRange: [salesStart, salesEnd],
+        trxRange: [trxStart, trxEnd],
+        salesRowsCounted: top200Sales.rowCount,
+        trxRowsCounted: top200Trx.rowCount
+      }
     });
 
   } catch (err) {
@@ -652,7 +671,8 @@ const html = `<!DOCTYPE html>
         f.area    ? 'Area: ' + f.area       : null,
         f.storeId ? 'Store: ' + f.storeId   : null
       ].filter(Boolean).join(' · ') || 'No filters';
-      statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+      const td = data._top200Debug || {};
+      statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · TOP200 [Sales rows: \${td.salesRowsCounted}, TRX rows: \${td.trxRowsCounted}, headers at: \${(td.headerIndices||[]).join(',')}] · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
       document.getElementById('footerText').textContent =
         \`CAMANAVA Region · Data Source: Google Sheets · \${data.rowCount} rows matched\`;
 
