@@ -27,73 +27,85 @@ function parseCSV(text) {
   return rows;
 }
 
-// Fetch and parse public Google Sheet via CSV export
+// Helper: fetch and parse a sheet by name
+async function fetchSheet(sheetName) {
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(sheetName)}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Sheet "${sheetName}" fetch failed: ${response.status}`);
+  const text = await response.text();
+  return parseCSV(text);
+}
+
+const num = (val) => {
+  if (!val || val.trim() === '') return 0;
+  return parseFloat(val.replace(/,/g, '')) || 0;
+};
+
+const diffPct = (cur, ya) => ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+const diffVal = (cur, ya) => cur - ya;
+
+// Build a metrics block { current, yearAgo, diffPct, diffVal } for sales, trx, basket
+function buildMetrics(salesCur, salesYA, trxCur, trxYA) {
+  const bskCur = trxCur !== 0 ? salesCur / trxCur : 0;
+  const bskYA  = trxYA !== 0 ? salesYA / trxYA : 0;
+  return {
+    sales:  { current: salesCur, yearAgo: salesYA, diffPct: diffPct(salesCur, salesYA), diffVal: diffVal(salesCur, salesYA) },
+    trx:    { current: trxCur,   yearAgo: trxYA,   diffPct: diffPct(trxCur, trxYA),     diffVal: diffVal(trxCur, trxYA) },
+    basket: { current: bskCur,   yearAgo: bskYA,   diffPct: diffPct(bskCur, bskYA),     diffVal: diffVal(bskCur, bskYA) }
+  };
+}
+
 app.get('/api/data', async (req, res) => {
   try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('Sheet fetch failed: ' + response.status);
-    const text = await response.text();
-    const allRows = parseCSV(text);
+    // Fetch both sheets in parallel
+    const [salesRows, shopperRows] = await Promise.all([
+      fetchSheet(SHEET_NAME),
+      fetchSheet('ShopperMetricsData')
+    ]);
 
-    // First row is header, skip it
-    const dataRows = allRows.slice(1);
-
-    // Column index map (0-based):
-    // A=0 MONTH, B=1 REGION, C=2 AREA, D=3 STORE ID, E=4 STORE NAME
-    // F=5 SALES MTD, G=6 SALES MTD YA, H=7 SALES GROWTH MTD
-    // I=8 SALES YTD, J=9 SALES YTD YA, K=10 SALES GROWTH YTD
-    // L=11 SALES PER SQM
-    // M=12 TRX COUNT MTD, N=13 BASKETSIZE MTD
-    // O=14 TRX COUNT MTD YA, P=15 BASKETSIZE MTD YA
-
-    const num = (val) => {
-      if (!val || val.trim() === '') return 0;
-      return parseFloat(val.replace(/,/g, '')) || 0;
-    };
-
-    let salesCurrent = 0, salesYA = 0;
-    let trxCurrent = 0, trxYA = 0;
-    let validRows = 0;
-
-    dataRows.forEach(cols => {
-      if (!cols[5] || cols[5].trim() === '') return; // skip empty rows
-      salesCurrent  += num(cols[5]);   // F - SALES MTD
-      salesYA       += num(cols[6]);   // G - SALES MTD YA
-      trxCurrent    += num(cols[12]);  // M - TRX COUNT MTD
-      trxYA         += num(cols[14]);  // O - TRX COUNT MTD YA
+    // ===== SalesData: Total Sales =====
+    const salesData = salesRows.slice(1); // skip header
+    let sCur = 0, sYA = 0, tCur = 0, tYA = 0, validRows = 0;
+    salesData.forEach(cols => {
+      if (!cols[5] || cols[5].trim() === '') return;
+      sCur += num(cols[5]);   // F - SALES MTD
+      sYA  += num(cols[6]);   // G - SALES MTD YA
+      tCur += num(cols[12]);  // M - TRX COUNT MTD
+      tYA  += num(cols[14]);  // O - TRX COUNT MTD YA
       validRows++;
     });
+    const totalSalesMetrics = buildMetrics(sCur, sYA, tCur, tYA);
 
-    // Basket Size = Total Sales / Total Transaction Count
-    const bskCurrent = trxCurrent !== 0 ? salesCurrent / trxCurrent : 0;
-    const bskYA      = trxYA !== 0 ? salesYA / trxYA : 0;
+    // ===== ShopperMetricsData: TNAP, KAIN, PERKS, PAG-IBIG =====
+    // Col A=0 TYPE, I=8 TRXCount, J=9 Sales, R=17 TRXCountLY, S=18 SalesLY
+    const shopperData = shopperRows.slice(1); // skip header
 
-    const diffPct = (cur, ya) => ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
-    const diffVal = (cur, ya) => cur - ya;
+    function sumByType(typeFilter) {
+      let salesCur = 0, salesYA = 0, trxCur = 0, trxYA = 0;
+      shopperData.forEach(cols => {
+        const type = (cols[0] || '').trim().toUpperCase();
+        if (type !== typeFilter.toUpperCase()) return;
+        salesCur += num(cols[9]);   // J - Sales
+        salesYA  += num(cols[18]);  // S - SalesLY
+        trxCur   += num(cols[8]);   // I - TRXCount
+        trxYA    += num(cols[17]);  // R - TRXCountLY
+      });
+      return buildMetrics(salesCur, salesYA, trxCur, trxYA);
+    }
+
+    const tnapMetrics    = sumByType('TNAP');
+    const kainMetrics    = sumByType('KAIN');
+    const perksMetrics   = sumByType('PERKS');
+    const pagibigMetrics = sumByType('PAG-IBIG');
 
     res.json({
       ok: true,
       rowCount: validRows,
-      headers: allRows[0],
-      totalSales: {
-        current:  salesCurrent,
-        yearAgo:  salesYA,
-        diffPct:  diffPct(salesCurrent, salesYA),
-        diffVal:  diffVal(salesCurrent, salesYA)
-      },
-      totalTrx: {
-        current:  trxCurrent,
-        yearAgo:  trxYA,
-        diffPct:  diffPct(trxCurrent, trxYA),
-        diffVal:  diffVal(trxCurrent, trxYA)
-      },
-      basketSize: {
-        current:  bskCurrent,
-        yearAgo:  bskYA,
-        diffPct:  diffPct(bskCurrent, bskYA),
-        diffVal:  diffVal(bskCurrent, bskYA)
-      }
+      totalSales: totalSalesMetrics,
+      tnap: tnapMetrics,
+      kain: kainMetrics,
+      perks: perksMetrics,
+      pagibig: pagibigMetrics
     });
 
   } catch (err) {
@@ -362,18 +374,26 @@ const html = `<!DOCTYPE html>
     </tr>\`;
   }
 
+  // Helper: build a row from a metrics object { sales:{...}, trx:{...}, basket:{...} }
+  function metricsRow(label, m) {
+    return dataRow(label,
+      m.sales.current, m.sales.yearAgo, m.sales.diffPct, m.sales.diffVal,
+      m.trx.current, m.trx.yearAgo, m.trx.diffPct, m.trx.diffVal,
+      m.basket.current, m.basket.yearAgo, m.basket.diffPct, m.basket.diffVal
+    );
+  }
+
   function buildTable(d) {
+    // Total TNAP = TNAP + KAIN combined
+    const totalTnap = buildCombined(d.tnap, d.kain);
+
     const tb = document.getElementById('tableBody');
     tb.innerHTML = \`
       <tr class="group-label"><td colspan="15">Overview</td></tr>
-      \${dataRow('Total Sales',
-        d.totalSales.current, d.totalSales.yearAgo, d.totalSales.diffPct, d.totalSales.diffVal,
-        d.totalTrx.current, d.totalTrx.yearAgo, d.totalTrx.diffPct, d.totalTrx.diffVal,
-        d.basketSize.current, d.basketSize.yearAgo, d.basketSize.diffPct, d.basketSize.diffVal
-      )}
-      \${emptyRow('Total TNAP')}
-      \${emptyRow('TNAP')}
-      \${emptyRow('KAIN')}
+      \${metricsRow('Total Sales', d.totalSales)}
+      \${metricsRow('Total TNAP', totalTnap)}
+      \${metricsRow('TNAP', d.tnap)}
+      \${metricsRow('KAIN', d.kain)}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Loyalty Segments</td></tr>
       \${emptyRow('APAR')}
@@ -383,8 +403,8 @@ const html = `<!DOCTYPE html>
       \${emptyRow('Elite')}
       \${emptyRow('Green')}
       \${emptyRow('Total GEG')}
-      \${emptyRow('PERKS')}
-      \${emptyRow('PAG-IBIG')}
+      \${metricsRow('PERKS', d.perks)}
+      \${metricsRow('PAG-IBIG', d.pagibig)}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Uncarded</td></tr>
       \${emptyRow('UnCarded with Unusual')}
@@ -392,6 +412,22 @@ const html = `<!DOCTYPE html>
       \${emptyRow('Total Uncarded')}
       \${emptyRow('Net of USUAL')}
     \`;
+  }
+
+  // Combine two metrics objects (add sales & trx, recompute basket)
+  function buildCombined(a, b) {
+    const sCur = a.sales.current + b.sales.current;
+    const sYA  = a.sales.yearAgo + b.sales.yearAgo;
+    const tCur = a.trx.current + b.trx.current;
+    const tYA  = a.trx.yearAgo + b.trx.yearAgo;
+    const bCur = tCur !== 0 ? sCur / tCur : 0;
+    const bYA  = tYA !== 0 ? sYA / tYA : 0;
+    const dp = (c, y) => y !== 0 ? ((c - y) / Math.abs(y)) * 100 : 0;
+    return {
+      sales:  { current: sCur, yearAgo: sYA, diffPct: dp(sCur, sYA), diffVal: sCur - sYA },
+      trx:    { current: tCur, yearAgo: tYA, diffPct: dp(tCur, tYA), diffVal: tCur - tYA },
+      basket: { current: bCur, yearAgo: bYA, diffPct: dp(bCur, bYA), diffVal: bCur - bYA }
+    };
   }
 
   async function loadData() {
