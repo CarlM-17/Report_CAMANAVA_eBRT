@@ -77,19 +77,32 @@ app.get('/api/data', async (req, res) => {
     const totalSalesMetrics = buildMetrics(sCur, sYA, tCur, tYA);
 
     // ===== ShopperMetricsData: TNAP, KAIN, PERKS, PAG-IBIG =====
-    // Col A=0 TYPE, I=8 TRXCount, J=9 Sales, R=17 TRXCountLY, S=18 SalesLY
+    // Auto-detect column indices from header row
+    const shopperHeaders = shopperRows[0].map(h => (h || '').trim().toUpperCase());
+    const colIdx = (name) => {
+      const idx = shopperHeaders.indexOf(name.toUpperCase());
+      return idx;
+    };
+
+    const typeCol     = colIdx('TYPE');
+    const salesCol    = colIdx('Sales');
+    const salesLYCol  = colIdx('SalesLY');
+    const trxCol      = colIdx('TRXCount');
+    const trxLYCol    = colIdx('TRXCountLY');
+
     const shopperData = shopperRows.slice(1); // skip header
 
     function sumByType(typeFilter) {
       let salesCur = 0, salesYA = 0, trxCur = 0, trxYA = 0, matchCount = 0;
       shopperData.forEach(cols => {
-        const type = (cols[0] || '').trim().toUpperCase();
+        if (typeCol < 0) return;
+        const type = (cols[typeCol] || '').trim().toUpperCase();
         if (type !== typeFilter.toUpperCase()) return;
         matchCount++;
-        salesCur += num(cols[9]);   // J - Sales
-        salesYA  += num(cols[18]);  // S - SalesLY
-        trxCur   += num(cols[8]);   // I - TRXCount
-        trxYA    += num(cols[17]);  // R - TRXCountLY
+        if (salesCol >= 0)   salesCur += num(cols[salesCol]);
+        if (salesLYCol >= 0) salesYA  += num(cols[salesLYCol]);
+        if (trxCol >= 0)     trxCur   += num(cols[trxCol]);
+        if (trxLYCol >= 0)   trxYA    += num(cols[trxLYCol]);
       });
       const m = buildMetrics(salesCur, salesYA, trxCur, trxYA);
       m.matchCount = matchCount;
@@ -102,9 +115,7 @@ app.get('/api/data', async (req, res) => {
     const pagibigMetrics = sumByType('PAG-IBIG');
 
     // Diagnostics
-    const uniqueTypes = [...new Set(shopperData.map(r => (r[0] || '').trim()))];
-    const shopperHeaders = shopperRows[0];
-    const sampleRow = shopperData[0] ? shopperData[0].slice(0, 10) : [];
+    const uniqueTypes = typeCol >= 0 ? [...new Set(shopperData.map(r => (r[typeCol] || '').trim()))] : ['TYPE COL NOT FOUND'];
 
     res.json({
       ok: true,
@@ -117,8 +128,8 @@ app.get('/api/data', async (req, res) => {
       _debug: {
         shopperTotalRows: shopperData.length,
         uniqueTypes,
-        shopperHeaders: shopperHeaders.map((h, i) => `[${i}]${h}`),
-        sampleFirstRow: sampleRow.map((v, i) => `[${i}]${v}`)
+        detectedColumns: { typeCol, salesCol, salesLYCol, trxCol, trxLYCol },
+        rawHeaders: shopperRows[0]
       }
     });
 
@@ -468,7 +479,8 @@ const html = `<!DOCTYPE html>
 
       statusBar.className = 'status-bar';
       const dbg = data._debug || {};
-      statusBar.innerHTML = \`✅ Loaded \${data.rowCount} store rows · Shopper: \${dbg.shopperTotalRows || 0} rows · Types found: \${(dbg.uniqueTypes || []).join(', ')} · TNAP matches: \${data.tnap.matchCount || 0} · Last refreshed: \${new Date().toLocaleTimeString('en-PH')}\`;
+      const cols = dbg.detectedColumns || {};
+      statusBar.innerHTML = \`✅ Sales: \${data.rowCount} rows · Shopper: \${dbg.shopperTotalRows || 0} rows · Types: \${(dbg.uniqueTypes || []).join(', ')} · TNAP: \${data.tnap.matchCount || 0} · Cols: TYPE=\${cols.typeCol} Sales=\${cols.salesCol} TRX=\${cols.trxCol}\`;
       document.getElementById('footerText').textContent =
         \`CAMANAVA Region · Data Source: Google Sheets · \${data.rowCount} stores loaded\`;
 
