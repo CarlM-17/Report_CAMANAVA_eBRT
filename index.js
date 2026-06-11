@@ -261,8 +261,8 @@ app.get('/api/data', async (req, res) => {
 
     // Sales: A2:AQ22 → indices 1-21
     const top200Sales = sumTop200Section(top200Rows, 1, 21);
-    // TRX: A33:AQ53 → indices 32-52
-    const top200Trx   = sumTop200Section(top200Rows, 32, 52);
+    // TRX: A33:AQ55 → indices 32-54
+    const top200Trx   = sumTop200Section(top200Rows, 32, 54);
 
     const top200Metrics = buildMetrics(top200Sales.cur, top200Sales.ya, top200Trx.cur, top200Trx.ya);
 
@@ -282,7 +282,7 @@ app.get('/api/data', async (req, res) => {
       top200: top200Metrics,
       _top200Debug: {
         salesRange: [1, 21],
-        trxRange: [32, 52],
+        trxRange: [32, 54],
         totalRows: top200Rows.length,
         salesRowsCounted: top200Sales.rowCount,
         trxRowsCounted: top200Trx.rowCount
