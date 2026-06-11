@@ -593,6 +593,8 @@ const html = `<!DOCTYPE html>
     const totalTnap = buildCombined(d.tnap, d.kain);
     // Total GEG = Gold + Elite + Green
     const totalGEG = buildCombined(buildCombined(d.gold, d.elite), d.green);
+    // Balance TNAP = Total TNAP - APAR - TOP 200
+    const balanceTnap = buildSubtract(buildSubtract(totalTnap, d.apar), d.top200);
 
     const tb = document.getElementById('tableBody');
     tb.innerHTML = \`
@@ -605,7 +607,7 @@ const html = `<!DOCTYPE html>
       <tr class="group-label"><td colspan="15">Loyalty Segments</td></tr>
       \${metricsRow('APAR', d.apar)}
       \${metricsRow('TOP 200', d.top200)}
-      \${emptyRow('Balance TNAP')}
+      \${metricsRow('Balance TNAP', balanceTnap)}
       \${metricsRow('Gold', d.gold)}
       \${metricsRow('Elite', d.elite)}
       \${metricsRow('Green', d.green)}
@@ -627,6 +629,22 @@ const html = `<!DOCTYPE html>
     const sYA  = a.sales.yearAgo + b.sales.yearAgo;
     const tCur = a.trx.current + b.trx.current;
     const tYA  = a.trx.yearAgo + b.trx.yearAgo;
+    const bCur = tCur !== 0 ? sCur / tCur : 0;
+    const bYA  = tYA !== 0 ? sYA / tYA : 0;
+    const dp = (c, y) => y !== 0 ? ((c - y) / Math.abs(y)) * 100 : 0;
+    return {
+      sales:  { current: sCur, yearAgo: sYA, diffPct: dp(sCur, sYA), diffVal: sCur - sYA },
+      trx:    { current: tCur, yearAgo: tYA, diffPct: dp(tCur, tYA), diffVal: tCur - tYA },
+      basket: { current: bCur, yearAgo: bYA, diffPct: dp(bCur, bYA), diffVal: bCur - bYA }
+    };
+  }
+
+  // Subtract b from a (a - b), recompute basket
+  function buildSubtract(a, b) {
+    const sCur = a.sales.current - b.sales.current;
+    const sYA  = a.sales.yearAgo - b.sales.yearAgo;
+    const tCur = a.trx.current - b.trx.current;
+    const tYA  = a.trx.yearAgo - b.trx.yearAgo;
     const bCur = tCur !== 0 ? sCur / tCur : 0;
     const bYA  = tYA !== 0 ? sYA / tYA : 0;
     const dp = (c, y) => y !== 0 ? ((c - y) / Math.abs(y)) * 100 : 0;
