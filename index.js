@@ -217,23 +217,37 @@ app.get('/api/data', async (req, res) => {
     const greenMetrics = sumGEG('Green');
 
     // ===== Top200 sheet =====
-    // Sales section: A2:AQ22 (header in row 1) → array indices 1-21
-    // TRX section:   A33:AQ53 (header at row 33) → array indices 32-52
-    // Column layout per row (same for both sections):
-    //   A=0 Region, B=1 Area, C=2 StoreID, D=3 StoreName, E=4 NoAccts, F=5 Tier
-    //   G-R = 6-17: Jan_YA ... Dec_YA
-    //   W-AH = 22-33: Jan_Current ... Dec_Current
+    // Has TWO sections: Sales (top), TRX (bottom), with identical column structure.
+    // Find the TRX section by locating the SECOND header row (col C = "STOREID").
+    // Column layout (same for both sections):
+    //   C=2 StoreID, G-R = 6-17: Jan_YA...Dec_YA, W-AH = 22-33: Jan_Current...Dec_Current
     const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const YA_COL_START  = 6;
     const CUR_COL_START = 22;
 
+    // Find header row indices (where col C looks like a header: "STOREID", "STORE ID", etc.)
+    const headerIndices = [];
+    top200Rows.forEach((r, i) => {
+      const c = (r && r[2] || '').toString().trim().toUpperCase().replace(/[\s_]/g, '');
+      const a = (r && r[0] || '').toString().trim().toUpperCase();
+      if (c === 'STOREID' || a === 'REGION') headerIndices.push(i);
+    });
+
+    // Sales section: from index 1 to just before TRX header (or end if no second header)
+    const salesStart = 1;
+    const salesEnd   = headerIndices.length >= 2 ? headerIndices[1] - 1 : top200Rows.length - 1;
+    // TRX section: from row after second header to end
+    const trxStart   = headerIndices.length >= 2 ? headerIndices[1] + 1 : -1;
+    const trxEnd     = top200Rows.length - 1;
+
     function sumTop200Section(rows, startIdx, endIdx) {
       let cur = 0, ya = 0, rowCount = 0;
+      if (startIdx < 0) return { cur, ya, rowCount };
       for (let i = startIdx; i <= endIdx && i < rows.length; i++) {
         const r = rows[i];
         if (!r || !r[2]) continue;
         const rowStoreId = (r[2] || '').trim();
-        // Skip header rows (text Store ID like "STOREID")
+        // Skip rows where Store ID isn't a number (header rows, blank rows)
         if (isNaN(parseFloat(rowStoreId))) continue;
         if (!matchStoreId(rowStoreId)) continue;
         if (!matchArea(rowStoreId)) continue;
@@ -259,10 +273,8 @@ app.get('/api/data', async (req, res) => {
       return { cur, ya, rowCount };
     }
 
-    // Sales: A2:AQ22 → indices 1-21
-    const top200Sales = sumTop200Section(top200Rows, 1, 21);
-    // TRX: A33:AQ55 → indices 32-54
-    const top200Trx   = sumTop200Section(top200Rows, 32, 54);
+    const top200Sales = sumTop200Section(top200Rows, salesStart, salesEnd);
+    const top200Trx   = sumTop200Section(top200Rows, trxStart, trxEnd);
 
     const top200Metrics = buildMetrics(top200Sales.cur, top200Sales.ya, top200Trx.cur, top200Trx.ya);
 
@@ -281,9 +293,10 @@ app.get('/api/data', async (req, res) => {
       green: greenMetrics,
       top200: top200Metrics,
       _top200Debug: {
-        salesRange: [1, 21],
-        trxRange: [32, 54],
-        totalRows: top200Rows.length,
+        totalSheetRows: top200Rows.length,
+        headerIndices,
+        salesRange: [salesStart, salesEnd],
+        trxRange: [trxStart, trxEnd],
         salesRowsCounted: top200Sales.rowCount,
         trxRowsCounted: top200Trx.rowCount
       }
@@ -657,7 +670,7 @@ const html = `<!DOCTYPE html>
         f.storeId ? 'Store: ' + f.storeId   : null
       ].filter(Boolean).join(' · ') || 'No filters';
       const td = data._top200Debug || {};
-      statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · TOP200 [Sales:\${td.salesRowsCounted} TRX:\${td.trxRowsCounted} totalSheetRows:\${td.totalRows}] · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+      statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · TOP200 [Sales rows:\${td.salesRowsCounted} TRX rows:\${td.trxRowsCounted} · headers at idx:\${(td.headerIndices||[]).join(',')} · totalSheetRows:\${td.totalSheetRows}] · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
       document.getElementById('footerText').textContent =
         \`CAMANAVA Region · Data Source: Google Sheets · \${data.rowCount} rows matched\`;
 
