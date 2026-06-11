@@ -531,6 +531,12 @@ const html = `<!DOCTYPE html>
     return sign + n.toFixed(2) + '%';
   }
 
+  // SOB format - plain percentage, no sign prefix
+  function fmtSob(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return n.toFixed(2) + '%';
+  }
+
   function fmtDiffVal(n, isCount = false) {
     if (n === null || n === undefined || isNaN(n)) return '—';
     const sign = n >= 0 ? '+' : '';
@@ -575,8 +581,8 @@ const html = `<!DOCTYPE html>
       <td class="data-col">\${fmt(bskYA)}</td>
       <td class="data-col \${bDiffPctClass}">\${fmtPct(bskDiffPct)}</td>
       <td class="data-col \${bDiffValClass}">\${fmtDiffVal(bskDiffVal)}</td>
-      <td class="data-col">\${sobCur === null || sobCur === undefined ? '<span class="empty-cell">—</span>' : fmtPct(sobCur)}</td>
-      <td class="data-col">\${sobYA  === null || sobYA  === undefined ? '<span class="empty-cell">—</span>' : fmtPct(sobYA)}</td>
+      <td class="data-col">\${sobCur === null || sobCur === undefined ? '<span class="empty-cell">—</span>' : fmtSob(sobCur)}</td>
+      <td class="data-col">\${sobYA  === null || sobYA  === undefined ? '<span class="empty-cell">—</span>' : fmtSob(sobYA)}</td>
     </tr>\`;
   }
 
@@ -645,9 +651,7 @@ const html = `<!DOCTYPE html>
       \${metricsRow('Green', d.green,
         sob(d.green.sales.current, totalTnapSalesCur),
         sob(d.green.sales.yearAgo, totalTnapSalesYA))}
-      \${metricsRow('Total GEG', totalGEG,
-        sob(totalGEG.sales.current, totalTnapSalesCur),
-        sob(totalGEG.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('Total GEG', totalGEG)}
       \${metricsRow('PERKS', d.perks,
         sob(d.perks.sales.current, totalSalesCur),
         sob(d.perks.sales.yearAgo, totalSalesYA))}
