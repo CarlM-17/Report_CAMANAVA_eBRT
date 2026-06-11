@@ -626,11 +626,11 @@ const html = `<!DOCTYPE html>
         sob(totalTnap.sales.current, totalSalesCur),
         sob(totalTnap.sales.yearAgo, totalSalesYA))}
       \${metricsRow('TNAP', d.tnap,
-        sob(d.tnap.sales.current, totalTnapSalesCur),
-        sob(d.tnap.sales.yearAgo, totalTnapSalesYA))}
+        sob(d.tnap.sales.current, totalSalesCur),
+        sob(d.tnap.sales.yearAgo, totalSalesYA))}
       \${metricsRow('KAIN', d.kain,
-        sob(d.kain.sales.current, totalTnapSalesCur),
-        sob(d.kain.sales.yearAgo, totalTnapSalesYA))}
+        sob(d.kain.sales.current, totalSalesCur),
+        sob(d.kain.sales.yearAgo, totalSalesYA))}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Loyalty Segments</td></tr>
       \${metricsRow('APAR', d.apar,
