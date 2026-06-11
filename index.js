@@ -539,8 +539,16 @@ const html = `<!DOCTYPE html>
     .content { padding: 12px 14px; }
     .filter-bar { padding: 10px 12px; gap: 10px; }
 
+    /* Give table proper width on mobile - let it scroll instead of squish */
+    table {
+      font-size: 11px;
+      min-width: 1200px;
+      table-layout: auto;
+    }
+    tbody tr td.metrics-col { min-width: 130px; width: 130px; }
+    tbody tr td.data-col { min-width: 75px; padding: 6px 8px; }
+
     /* Sticky first column for table */
-    table { font-size: 10.5px; }
     .metrics-col {
       position: sticky; left: 0; z-index: 2;
       background: white !important;
@@ -580,45 +588,29 @@ const html = `<!DOCTYPE html>
       gap: 8px;
       padding: 10px;
     }
-    .filter-bar > * {
-      width: 100%;
-    }
-    .filter-bar label {
-      width: auto;
-      padding-top: 4px;
-    }
+    .filter-bar > * { width: 100%; }
+    .filter-bar label { width: auto; padding-top: 4px; }
     .filter-bar select, .filter-bar input {
-      width: 100%;
-      padding: 9px 12px;
-      font-size: 14px;
-      min-height: 38px;
+      width: 100%; padding: 9px 12px; font-size: 14px; min-height: 38px;
     }
     .btn-refresh {
-      margin-left: 0;
-      width: 100%;
-      justify-content: center;
-      padding: 10px;
-      font-size: 13px;
-      min-height: 40px;
+      margin-left: 0; width: 100%; justify-content: center;
+      padding: 10px; font-size: 13px; min-height: 40px;
     }
 
     /* Compact status bar */
-    .status-bar {
-      font-size: 10.5px;
-      padding: 7px 10px;
-      line-height: 1.5;
-    }
+    .status-bar { font-size: 10.5px; padding: 7px 10px; line-height: 1.5; }
 
-    /* Compact table */
-    table { font-size: 10px; }
-    tbody tr td { padding: 6px 4px; }
-    tbody tr td.metrics-col { font-size: 10.5px; padding-left: 8px; }
-    tbody tr td.data-col { padding-right: 6px; }
-    .section-header td { font-size: 9.5px; padding: 7px 3px; }
-    .col-header td { font-size: 9px; padding: 5px 3px; }
-    tbody tr.highlight-row td.metrics-col { font-size: 11px; }
-    tbody tr.highlight-row td.data-col { font-size: 10.5px; }
-    .group-label td { font-size: 9px; padding: 9px 10px 4px; }
+    /* Mobile table - keep numbers from overlapping by ensuring min width */
+    table {
+      font-size: 11px;
+      min-width: 1150px;
+    }
+    tbody tr td.metrics-col { min-width: 120px; width: 120px; padding-left: 10px; }
+    tbody tr td.data-col { min-width: 70px; padding: 7px 8px; }
+    .section-header td { font-size: 10px; padding: 7px 4px; }
+    .col-header td { font-size: 9.5px; padding: 6px 4px; }
+    .group-label td { font-size: 9.5px; padding: 9px 10px 4px; }
 
     .footer { font-size: 9.5px; padding: 14px 0 4px; }
   }
