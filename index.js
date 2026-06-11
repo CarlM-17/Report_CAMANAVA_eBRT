@@ -337,95 +337,194 @@ const html = `<!DOCTYPE html>
 <title>CAMANAVA eBRT Report</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f0f2f0; color: #222; min-height: 100vh; }
+  body {
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    background: #f4f6f4;
+    color: #1a2e1f;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
 
+  /* TOP NAV */
   .top-nav {
-    background: #1B5E20; color: white; padding: 12px 24px;
+    background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 100%);
+    color: white; padding: 14px 28px;
     display: flex; align-items: center; justify-content: space-between;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    box-shadow: 0 1px 0 rgba(0,0,0,0.05);
   }
-  .top-nav .brand { font-size: 18px; font-weight: 700; letter-spacing: 1px; }
-  .top-nav .brand span { color: #A5D6A7; font-size: 12px; display: block; font-weight: 400; letter-spacing: 2px; }
-  .top-nav .date-label { font-size: 12px; color: #A5D6A7; }
+  .top-nav .brand { font-size: 17px; font-weight: 700; letter-spacing: 0.5px; line-height: 1.2; }
+  .top-nav .brand span {
+    color: #FFD54F; font-size: 10px; display: block; font-weight: 500;
+    letter-spacing: 2px; margin-top: 2px;
+  }
+  .top-nav .date-label {
+    font-size: 12px; color: #C8E6C9; font-weight: 500;
+    background: rgba(255,255,255,0.08); padding: 5px 12px; border-radius: 6px;
+  }
 
-  .tabs { background: #2E7D32; display: flex; padding: 0 24px; gap: 4px; }
+  /* TABS */
+  .tabs {
+    background: white; display: flex; padding: 0 28px; gap: 0;
+    border-bottom: 1px solid #e5e8e5;
+  }
   .tab-btn {
-    background: transparent; border: none; color: #C8E6C9;
-    padding: 11px 22px; font-size: 13px; font-weight: 600; cursor: pointer;
-    border-bottom: 3px solid transparent; transition: all 0.2s; letter-spacing: 0.5px;
+    background: transparent; border: none; color: #5a6b5e;
+    padding: 13px 20px; font-size: 13px; font-weight: 600; cursor: pointer;
+    border-bottom: 3px solid transparent; transition: all 0.15s;
+    letter-spacing: 0.3px;
   }
-  .tab-btn:hover { color: white; background: rgba(255,255,255,0.08); }
-  .tab-btn.active { color: white; border-bottom: 3px solid #A5D6A7; background: rgba(255,255,255,0.1); }
+  .tab-btn:hover { color: #1B5E20; }
+  .tab-btn.active {
+    color: #1B5E20;
+    border-bottom-color: #FFC107;
+  }
 
-  .content { padding: 14px 16px; }
+  /* CONTENT */
+  .content { padding: 18px 28px; }
 
+  /* FILTER BAR */
   .filter-bar {
-    background: white; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px;
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    background: white; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    border: 1px solid #e8ebe8;
   }
-  .filter-bar label { font-size: 11px; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
+  .filter-bar label {
+    font-size: 10px; font-weight: 700; color: #1B5E20;
+    text-transform: uppercase; letter-spacing: 0.8px;
+  }
   .filter-bar select, .filter-bar input {
-    border: 1px solid #ccc; border-radius: 5px; padding: 5px 8px;
-    font-size: 12px; color: #333; background: #fafafa;
+    border: 1px solid #d4dad4; border-radius: 6px; padding: 6px 10px;
+    font-size: 12px; color: #1a2e1f; background: white;
+    transition: border-color 0.15s; font-weight: 500;
   }
-  .filter-bar select:focus, .filter-bar input:focus { outline: none; border-color: #2E7D32; }
+  .filter-bar select:hover, .filter-bar input:hover { border-color: #2E7D32; }
+  .filter-bar select:focus, .filter-bar input:focus {
+    outline: none; border-color: #1B5E20;
+    box-shadow: 0 0 0 3px rgba(27,94,32,0.12);
+  }
   .btn-refresh {
-    margin-left: auto; background: #1B5E20; color: white; border: none;
-    border-radius: 5px; padding: 6px 14px; font-size: 12px; font-weight: 600;
-    cursor: pointer; transition: background 0.2s; display: flex; align-items: center; gap: 6px;
+    margin-left: auto;
+    background: #1B5E20; color: white; border: none;
+    border-radius: 6px; padding: 7px 16px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 6px;
+    letter-spacing: 0.3px;
   }
-  .btn-refresh:hover { background: #2E7D32; }
-  .btn-refresh.loading { opacity: 0.7; cursor: not-allowed; }
+  .btn-refresh:hover { background: #2E7D32; transform: translateY(-1px); }
+  .btn-refresh.loading { opacity: 0.6; cursor: not-allowed; transform: none; }
 
+  /* STATUS BAR */
   .status-bar {
-    background: #E8F5E9; border: 1px solid #C8E6C9; border-radius: 6px;
-    padding: 7px 14px; margin-bottom: 14px; font-size: 12px; color: #2E7D32;
-    display: flex; align-items: center; gap: 8px;
+    background: #F1F8E9; border-left: 3px solid #689F38; border-radius: 6px;
+    padding: 8px 14px; margin-bottom: 14px; font-size: 11.5px; color: #33691E;
+    display: flex; align-items: center; gap: 8px; font-weight: 500;
   }
-  .status-bar.error { background: #FFEBEE; border-color: #FFCDD2; color: #C62828; }
-  .status-bar.loading { background: #FFF8E1; border-color: #FFE082; color: #F57F17; }
+  .status-bar.error { background: #FFEBEE; border-left-color: #C62828; color: #C62828; }
+  .status-bar.loading { background: #FFF8E1; border-left-color: #F57F17; color: #E65100; }
 
-  .table-card { background: white; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); overflow: hidden; }
+  /* TABLE CARD */
+  .table-card {
+    background: white; border-radius: 10px; overflow: hidden;
+    border: 1px solid #e8ebe8;
+  }
   .table-wrapper { overflow-x: auto; }
 
-  table { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
+  table {
+    width: 100%; border-collapse: collapse; font-size: 11.5px;
+    table-layout: fixed;
+  }
 
+  /* SECTION HEADER */
   .section-header td {
-    background: #1B5E20; color: white; font-weight: 700; font-size: 11px;
-    letter-spacing: 0.5px; text-align: center; padding: 6px 4px; text-transform: uppercase;
+    background: #1B5E20; color: white;
+    font-weight: 700; font-size: 11px;
+    letter-spacing: 0.8px; text-align: center;
+    padding: 9px 4px; text-transform: uppercase;
+    position: relative;
   }
-  .col-header td {
-    background: #f5f5f5; color: #444; font-weight: 700; font-size: 10px;
-    text-align: center; padding: 5px 4px; border-bottom: 2px solid #ddd;
-    text-transform: uppercase; letter-spacing: 0.2px;
-  }
-  .col-header td.metrics-col { text-align: left; color: #1B5E20; padding-left: 8px; }
 
-  tbody tr td { padding: 5px 4px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
-  tbody tr td.metrics-col { font-weight: 600; color: #333; text-align: left; white-space: nowrap; padding-left: 8px; font-size: 11.5px; }
-  tbody tr td.data-col { text-align: right; color: #555; font-variant-numeric: tabular-nums; padding-right: 6px; }
+  /* COLUMN HEADER */
+  .col-header td {
+    background: #FAF8F0; color: #4a5550; font-weight: 700; font-size: 10px;
+    text-align: center; padding: 6px 4px;
+    border-bottom: 2px solid #FFC107;
+    text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .col-header td.metrics-col {
+    text-align: left; color: #1B5E20; padding-left: 12px;
+  }
+
+  /* DATA ROWS */
+  tbody tr td {
+    padding: 7px 5px; border-bottom: 1px solid #f0f2ef;
+    vertical-align: middle;
+  }
+  tbody tr td.metrics-col {
+    font-weight: 600; color: #1a2e1f; text-align: left;
+    white-space: nowrap; padding-left: 12px; font-size: 11.5px;
+  }
+  tbody tr td.data-col {
+    text-align: right; color: #3d4a40;
+    font-variant-numeric: tabular-nums; padding-right: 10px;
+    font-weight: 500;
+  }
   tbody tr td.diff-pos { color: #2E7D32; font-weight: 700; }
   tbody tr td.diff-neg { color: #C62828; font-weight: 700; }
 
-  tbody tr:hover td { background: #f9fcf9; }
-  .group-divider td { height: 10px; background: #f8f8f8; }
-  .group-label td {
-    font-size: 10px; font-weight: 700; color: #888; letter-spacing: 1px;
-    text-transform: uppercase; padding: 10px 10px 4px; background: #fafafa; border-bottom: none;
-  }
-  .empty-cell { color: #ccc; font-size: 11px; text-align: center !important; }
+  tbody tr:hover td { background: #F9FBF7; }
 
-  /* Section separator lines */
-  table td:nth-child(2), table th:nth-child(2) { border-left: 2px solid #1B5E20; }
-  table td:nth-child(6), table th:nth-child(6) { border-left: 2px solid #1B5E20; }
-  table td:nth-child(10), table th:nth-child(10) { border-left: 2px solid #1B5E20; }
-  table td:nth-child(14), table th:nth-child(14) { border-left: 2px solid #1B5E20; }
-  .section-header .sec-div { border-left: 2px solid rgba(255,255,255,0.4); }
-  .col-header .sec-div { border-left: 2px solid #1B5E20; }
-  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #ccc; border-top-color: #1B5E20; border-radius: 50%; animation: spin 0.7s linear infinite; }
+  /* TOTAL SALES HIGHLIGHTED ROW */
+  tbody tr.highlight-row td {
+    background: linear-gradient(90deg, #FFF8E1 0%, #FFF9C4 100%);
+    font-weight: 700;
+    border-bottom: 2px solid #FFC107;
+    border-top: 2px solid #FFC107;
+  }
+  tbody tr.highlight-row td.metrics-col {
+    color: #1B5E20;
+    font-size: 12.5px;
+    font-weight: 800;
+  }
+  tbody tr.highlight-row td.data-col {
+    color: #1a2e1f;
+    font-weight: 700;
+    font-size: 12px;
+  }
+  tbody tr.highlight-row:hover td {
+    background: linear-gradient(90deg, #FFF59D 0%, #FFEE58 100%);
+  }
+
+  /* GROUPS */
+  .group-divider td { height: 8px; background: #f4f6f4; border: none; }
+  .group-label td {
+    font-size: 10px; font-weight: 700; color: #1B5E20;
+    letter-spacing: 1.2px; text-transform: uppercase;
+    padding: 12px 12px 5px; background: white; border-bottom: none;
+  }
+  .empty-cell { color: #c5cdc5; font-size: 11px; text-align: center !important; font-weight: 400; }
+
+  /* SECTION SEPARATOR LINES - prominent green dividers */
+  table td:nth-child(2), table th:nth-child(2),
+  table td:nth-child(6), table th:nth-child(6),
+  table td:nth-child(10), table th:nth-child(10),
+  table td:nth-child(14), table th:nth-child(14) {
+    border-left: 3px double #1B5E20;
+  }
+  .section-header .sec-div { border-left: 3px solid #FFC107 !important; }
+  .col-header .sec-div { border-left: 3px double #1B5E20 !important; }
+
+  /* SPINNER */
+  .spinner {
+    display: inline-block; width: 12px; height: 12px;
+    border: 2px solid #C8E6C9; border-top-color: #1B5E20;
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+  }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .footer { text-align: center; padding: 16px; font-size: 11px; color: #aaa; }
+
+  /* FOOTER */
+  .footer {
+    text-align: center; padding: 18px 0 8px;
+    font-size: 10.5px; color: #94a094; letter-spacing: 0.4px;
+  }
 </style>
 </head>
 <body>
@@ -559,7 +658,7 @@ const html = `<!DOCTYPE html>
   function dataRow(label, salesCur, salesYA, salesDiffPct, salesDiffVal,
                    trxCur, trxYA, trxDiffPct, trxDiffVal,
                    bskCur, bskYA, bskDiffPct, bskDiffVal,
-                   sobCur, sobYA) {
+                   sobCur, sobYA, rowClass) {
     const sDiffPctClass = salesDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
     const sDiffValClass = salesDiffVal >= 0 ? 'diff-pos' : 'diff-neg';
     const tDiffPctClass = trxDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
@@ -567,7 +666,7 @@ const html = `<!DOCTYPE html>
     const bDiffPctClass = bskDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
     const bDiffValClass = bskDiffVal >= 0 ? 'diff-pos' : 'diff-neg';
 
-    return \`<tr>
+    return \`<tr class="\${rowClass || ''}">
       <td class="metrics-col">\${label}</td>
       <td class="data-col">\${fmt(salesCur)}</td>
       <td class="data-col">\${fmt(salesYA)}</td>
@@ -587,12 +686,12 @@ const html = `<!DOCTYPE html>
   }
 
   // Helper: build a row from a metrics object { sales:{...}, trx:{...}, basket:{...} }
-  function metricsRow(label, m, sobCur, sobYA) {
+  function metricsRow(label, m, sobCur, sobYA, rowClass) {
     return dataRow(label,
       m.sales.current, m.sales.yearAgo, m.sales.diffPct, m.sales.diffVal,
       m.trx.current, m.trx.yearAgo, m.trx.diffPct, m.trx.diffVal,
       m.basket.current, m.basket.yearAgo, m.basket.diffPct, m.basket.diffVal,
-      sobCur, sobYA
+      sobCur, sobYA, rowClass
     );
   }
 
@@ -621,7 +720,7 @@ const html = `<!DOCTYPE html>
     const tb = document.getElementById('tableBody');
     tb.innerHTML = \`
       <tr class="group-label"><td colspan="15">Overview</td></tr>
-      \${metricsRow('Total Sales', d.totalSales)}
+      \${metricsRow('Total Sales', d.totalSales, null, null, 'highlight-row')}
       \${metricsRow('Total TNAP', totalTnap,
         sob(totalTnap.sales.current, totalSalesCur),
         sob(totalTnap.sales.yearAgo, totalSalesYA))}
