@@ -470,7 +470,7 @@ const html = `<!DOCTYPE html>
   tbody tr td.diff-pos { color: #2E7D32; font-weight: 700; }
   tbody tr td.diff-neg { color: #C62828; font-weight: 700; }
 
-  tbody tr:hover td { background: #FFF9C4; transition: background 0.15s; }
+  tbody tr:hover td { background: #FFF176; transition: background 0.15s; }
 
   /* TOTAL SALES HIGHLIGHTED ROW */
   tbody tr.highlight-row td {
