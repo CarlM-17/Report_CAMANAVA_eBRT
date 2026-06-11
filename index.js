@@ -546,13 +546,14 @@ const html = `<!DOCTYPE html>
 
   function emptyRow(label) {
     const empties = Array(12).fill('<td class="data-col empty-cell">—</td>').join('');
-    const sob = Array(2).fill('<td class="data-col empty-cell">—</td>').join('');
-    return \`<tr><td class="metrics-col">\${label}</td>\${empties}\${sob}</tr>\`;
+    const sobCells = Array(2).fill('<td class="data-col empty-cell">—</td>').join('');
+    return \`<tr><td class="metrics-col">\${label}</td>\${empties}\${sobCells}</tr>\`;
   }
 
   function dataRow(label, salesCur, salesYA, salesDiffPct, salesDiffVal,
                    trxCur, trxYA, trxDiffPct, trxDiffVal,
-                   bskCur, bskYA, bskDiffPct, bskDiffVal) {
+                   bskCur, bskYA, bskDiffPct, bskDiffVal,
+                   sobCur, sobYA) {
     const sDiffPctClass = salesDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
     const sDiffValClass = salesDiffVal >= 0 ? 'diff-pos' : 'diff-neg';
     const tDiffPctClass = trxDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
@@ -574,18 +575,25 @@ const html = `<!DOCTYPE html>
       <td class="data-col">\${fmt(bskYA)}</td>
       <td class="data-col \${bDiffPctClass}">\${fmtPct(bskDiffPct)}</td>
       <td class="data-col \${bDiffValClass}">\${fmtDiffVal(bskDiffVal)}</td>
-      <td class="data-col empty-cell">—</td>
-      <td class="data-col empty-cell">—</td>
+      <td class="data-col">\${sobCur === null || sobCur === undefined ? '<span class="empty-cell">—</span>' : fmtPct(sobCur)}</td>
+      <td class="data-col">\${sobYA  === null || sobYA  === undefined ? '<span class="empty-cell">—</span>' : fmtPct(sobYA)}</td>
     </tr>\`;
   }
 
   // Helper: build a row from a metrics object { sales:{...}, trx:{...}, basket:{...} }
-  function metricsRow(label, m) {
+  function metricsRow(label, m, sobCur, sobYA) {
     return dataRow(label,
       m.sales.current, m.sales.yearAgo, m.sales.diffPct, m.sales.diffVal,
       m.trx.current, m.trx.yearAgo, m.trx.diffPct, m.trx.diffVal,
-      m.basket.current, m.basket.yearAgo, m.basket.diffPct, m.basket.diffVal
+      m.basket.current, m.basket.yearAgo, m.basket.diffPct, m.basket.diffVal,
+      sobCur, sobYA
     );
+  }
+
+  // Compute SOB as percentage: (numerator / denominator) * 100
+  function sob(numerator, denominator) {
+    if (!denominator || denominator === 0) return null;
+    return (numerator / denominator) * 100;
   }
 
   function buildTable(d) {
@@ -596,24 +604,56 @@ const html = `<!DOCTYPE html>
     // Balance TNAP = Total TNAP - APAR - TOP 200
     const balanceTnap = buildSubtract(buildSubtract(totalTnap, d.apar), d.top200);
 
+    // SOB denominators
+    const totalSalesCur     = d.totalSales.sales.current;
+    const totalSalesYA      = d.totalSales.sales.yearAgo;
+    const totalTnapSalesCur = totalTnap.sales.current;
+    const totalTnapSalesYA  = totalTnap.sales.yearAgo;
+    const tnapSalesCur      = d.tnap.sales.current;
+    const tnapSalesYA       = d.tnap.sales.yearAgo;
+
     const tb = document.getElementById('tableBody');
     tb.innerHTML = \`
       <tr class="group-label"><td colspan="15">Overview</td></tr>
       \${metricsRow('Total Sales', d.totalSales)}
-      \${metricsRow('Total TNAP', totalTnap)}
-      \${metricsRow('TNAP', d.tnap)}
-      \${metricsRow('KAIN', d.kain)}
+      \${metricsRow('Total TNAP', totalTnap,
+        sob(totalTnap.sales.current, totalSalesCur),
+        sob(totalTnap.sales.yearAgo, totalSalesYA))}
+      \${metricsRow('TNAP', d.tnap,
+        sob(d.tnap.sales.current, totalTnapSalesCur),
+        sob(d.tnap.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('KAIN', d.kain,
+        sob(d.kain.sales.current, totalTnapSalesCur),
+        sob(d.kain.sales.yearAgo, totalTnapSalesYA))}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Loyalty Segments</td></tr>
-      \${metricsRow('APAR', d.apar)}
-      \${metricsRow('TOP 200', d.top200)}
-      \${metricsRow('Balance TNAP', balanceTnap)}
-      \${metricsRow('Gold', d.gold)}
-      \${metricsRow('Elite', d.elite)}
-      \${metricsRow('Green', d.green)}
-      \${metricsRow('Total GEG', totalGEG)}
-      \${metricsRow('PERKS', d.perks)}
-      \${metricsRow('PAG-IBIG', d.pagibig)}
+      \${metricsRow('APAR', d.apar,
+        sob(d.apar.sales.current, totalTnapSalesCur),
+        sob(d.apar.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('TOP 200', d.top200,
+        sob(d.top200.sales.current, tnapSalesCur),
+        sob(d.top200.sales.yearAgo, tnapSalesYA))}
+      \${metricsRow('Balance TNAP', balanceTnap,
+        sob(balanceTnap.sales.current, totalTnapSalesCur),
+        sob(balanceTnap.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('Gold', d.gold,
+        sob(d.gold.sales.current, totalTnapSalesCur),
+        sob(d.gold.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('Elite', d.elite,
+        sob(d.elite.sales.current, totalTnapSalesCur),
+        sob(d.elite.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('Green', d.green,
+        sob(d.green.sales.current, totalTnapSalesCur),
+        sob(d.green.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('Total GEG', totalGEG,
+        sob(totalGEG.sales.current, totalTnapSalesCur),
+        sob(totalGEG.sales.yearAgo, totalTnapSalesYA))}
+      \${metricsRow('PERKS', d.perks,
+        sob(d.perks.sales.current, totalSalesCur),
+        sob(d.perks.sales.yearAgo, totalSalesYA))}
+      \${metricsRow('PAG-IBIG', d.pagibig,
+        sob(d.pagibig.sales.current, totalSalesCur),
+        sob(d.pagibig.sales.yearAgo, totalSalesYA))}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Uncarded</td></tr>
       \${emptyRow('UnCarded with Unusual')}
