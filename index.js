@@ -87,13 +87,15 @@ app.get('/api/data', async (req, res) => {
     const { area, storeId, month } = req.query;
 
     // Fetch all sheets in parallel
-    const [salesRows, shopperRows, storeRows, aparRows, gegRows, top200Rows] = await Promise.all([
+    const [salesRows, shopperRows, storeRows, aparRows, gegRows, top200Rows, unusualCurRows, unusualYARows] = await Promise.all([
       fetchSheet(SHEET_NAME),
       fetchSheet('ShopperMetricsData'),
       fetchSheet('ListOfStores'),
       fetchSheet('APAR'),
       fetchSheet('GEG'),
-      fetchSheet('Top200')
+      fetchSheet('Top200'),
+      fetchSheet('UnusualCurrent'),
+      fetchSheet('UnusualYearAgo')
     ]);
 
     // Build a Store ID → Area lookup map (from ListOfStores)
@@ -278,6 +280,40 @@ app.get('/api/data', async (req, res) => {
 
     const top200Metrics = buildMetrics(top200Sales.cur, top200Sales.ya, top200Trx.cur, top200Trx.ya);
 
+    // ===== Unusual Transactions (Current + Year Ago) =====
+    // Both sheets: A=0 Area, B=1 Store ID, C=2 Store Name, D=3 Month, E=4 Day,
+    //              F=5 Customer Name, G=6 Amount, H=7 Type, I=8 Carded, J=9 Desc, K=10 Remarks
+    function sumUnusual(rows) {
+      let total = 0;
+      const data = rows.slice(1); // skip header
+      data.forEach(cols => {
+        if (!cols || cols.length < 7) return;
+        const rowArea    = (cols[0] || '').trim();
+        const rowStoreId = (cols[1] || '').trim();
+        const rowMonth   = cols[3];
+        if (area    && rowArea.toLowerCase()    !== area.toLowerCase())    return;
+        if (storeId && rowStoreId               !== storeId.trim())         return;
+        if (month   && (rowMonth || '').trim().toLowerCase() !== month.toLowerCase()) return;
+        total += num(cols[6]); // G - Amount
+      });
+      return total;
+    }
+
+    const unusualCurrent = sumUnusual(unusualCurRows);
+    const unusualYearAgo = sumUnusual(unusualYARows);
+
+    const unusualMetrics = {
+      sales: {
+        current: unusualCurrent,
+        yearAgo: unusualYearAgo,
+        diffPct: diffPct(unusualCurrent, unusualYearAgo),
+        diffVal: diffVal(unusualCurrent, unusualYearAgo)
+      },
+      // No transaction count / basket size for unusual
+      trx:    null,
+      basket: null
+    };
+
     res.json({
       ok: true,
       rowCount: validRows,
@@ -292,6 +328,7 @@ app.get('/api/data', async (req, res) => {
       elite: eliteMetrics,
       green: greenMetrics,
       top200: top200Metrics,
+      unusual: unusualMetrics,
       _top200Debug: {
         totalSheetRows: top200Rows.length,
         headerIndices,
@@ -793,6 +830,25 @@ const html = `<!DOCTYPE html>
     );
   }
 
+  // Sales-only row: sales values shown, TRX and Basket cells show dashes
+  function salesOnlyRow(label, salesMetrics, sobCur, sobYA, rowClass) {
+    const s = salesMetrics.sales || salesMetrics;
+    const sDiffPctClass = s.diffPct >= 0 ? 'diff-pos' : 'diff-neg';
+    const sDiffValClass = s.diffVal >= 0 ? 'diff-pos' : 'diff-neg';
+    const blank = '<td class="data-col empty-cell">—</td>';
+    return \`<tr class="\${rowClass || ''}">
+      <td class="metrics-col">\${label}</td>
+      <td class="data-col">\${fmt(s.current)}</td>
+      <td class="data-col">\${fmt(s.yearAgo)}</td>
+      <td class="data-col \${sDiffPctClass}">\${fmtPct(s.diffPct)}</td>
+      <td class="data-col \${sDiffValClass}">\${fmtDiffVal(s.diffVal)}</td>
+      \${blank}\${blank}\${blank}\${blank}
+      \${blank}\${blank}\${blank}\${blank}
+      <td class="data-col">\${sobCur === null || sobCur === undefined ? '<span class="empty-cell">—</span>' : fmtSob(sobCur)}</td>
+      <td class="data-col">\${sobYA  === null || sobYA  === undefined ? '<span class="empty-cell">—</span>' : fmtSob(sobYA)}</td>
+    </tr>\`;
+  }
+
   // Compute SOB as percentage: (numerator / denominator) * 100
   function sob(numerator, denominator) {
     if (!denominator || denominator === 0) return null;
@@ -858,7 +914,9 @@ const html = `<!DOCTYPE html>
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Uncarded</td></tr>
       \${emptyRow('UnCarded with Unusual')}
-      \${emptyRow('UnUsual Transaction')}
+      \${salesOnlyRow('UnUsual Transaction', d.unusual,
+        sob(d.unusual.sales.current, totalSalesCur),
+        sob(d.unusual.sales.yearAgo, totalSalesYA))}
       \${emptyRow('Total Uncarded')}
       \${emptyRow('Net of USUAL')}
     \`;
