@@ -601,7 +601,9 @@ const html = `<!DOCTYPE html>
   .summary-header .summary-sub {
     font-size: 11px; color: #6b7570; font-weight: 500;
   }
-  .summary-table { font-size: 11px; min-width: 100%; }
+  .summary-table { font-size: 11px; min-width: 1500px; table-layout: fixed; }
+  .summary-table thead th.store-col,
+  .summary-table tbody td.store-col { width: 180px; min-width: 180px; }
   .summary-table thead th {
     background: #1B5E20; color: white;
     font-weight: 700; font-size: 10px;
@@ -628,6 +630,7 @@ const html = `<!DOCTYPE html>
   .summary-table tbody td.store-col {
     text-align: left; padding-left: 12px;
     color: #1a2e1f; font-weight: 600; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
   }
   .summary-table tbody tr:hover td { background: #FFF176; transition: background 0.15s; }
   .summary-table tbody tr:nth-child(even) td { background: #fafbf9; }
