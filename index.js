@@ -83,20 +83,26 @@ app.get('/api/filters', async (req, res) => {
 });
 
 app.get('/api/data', async (req, res) => {
+  const t0 = Date.now();
   try {
     const { area, storeId, month } = req.query;
 
-    // Fetch all sheets in parallel
-    const [salesRows, shopperRows, storeRows, aparRows, gegRows, top200Rows, unusualCurRows, unusualYARows] = await Promise.all([
+    // Fetch sheets in 2 batches of 4 to avoid Google Sheets rate limiting
+    const [salesRows, shopperRows, storeRows, aparRows] = await Promise.all([
       fetchSheet(SHEET_NAME),
       fetchSheet('ShopperMetricsData'),
       fetchSheet('ListOfStores'),
-      fetchSheet('APAR'),
+      fetchSheet('APAR')
+    ]);
+    const t1 = Date.now();
+    const [gegRows, top200Rows, unusualCurRows, unusualYARows] = await Promise.all([
       fetchSheet('GEG'),
       fetchSheet('Top200'),
       fetchSheet('UnusualCurrent'),
       fetchSheet('UnusualYearAgo')
     ]);
+    const t2 = Date.now();
+    console.log(`[/api/data] Fetch batch 1: ${t1-t0}ms, batch 2: ${t2-t1}ms, total fetch: ${t2-t0}ms`);
 
     // Build a Store ID → Area lookup map (from ListOfStores)
     const storeAreaMap = {};
@@ -307,6 +313,7 @@ app.get('/api/data', async (req, res) => {
     }
 
     // Aggregate (uses user filters)
+    const t3 = Date.now();
     const agg = computeMetrics(storeId);
 
     // Per-store breakdown
@@ -319,6 +326,8 @@ app.get('/api/data', async (req, res) => {
       const name = (r[4] || '').trim();
       return { storeId: sid, storeName: name, metrics: computeMetrics(sid) };
     });
+    const t4 = Date.now();
+    console.log(`[/api/data] Index+aggregate: ${t3-t2}ms, per-store (${storeList.length} stores): ${t4-t3}ms, total: ${t4-t0}ms`);
 
     res.json({
       ok: true,
