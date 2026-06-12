@@ -913,12 +913,32 @@ const html = `<!DOCTYPE html>
         sob(d.pagibig.sales.yearAgo, totalSalesYA))}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Uncarded</td></tr>
-      \${emptyRow('UnCarded with Unusual')}
-      \${salesOnlyRow('UnUsual Transaction', d.unusual,
-        sob(d.unusual.sales.current, totalSalesCur),
-        sob(d.unusual.sales.yearAgo, totalSalesYA))}
-      \${emptyRow('Total Uncarded')}
-      \${emptyRow('Net of USUAL')}
+      \${(() => {
+        // Uncarded with Unusual = Total Sales - Total TNAP - PERKS - PAG-IBIG
+        const uncardedWithUnusual = buildSubtract(buildSubtract(buildSubtract(d.totalSales, totalTnap), d.perks), d.pagibig);
+        // Total Uncarded = Uncarded with Unusual - Unusual (Sales subtract; TRX unchanged since Unusual has none)
+        const totalUncarded = buildSubtract(uncardedWithUnusual, d.unusual);
+        // Net of Unusual = Total Sales - Unusual (sales only)
+        const netOfUnusualSalesCur = d.totalSales.sales.current - d.unusual.sales.current;
+        const netOfUnusualSalesYA  = d.totalSales.sales.yearAgo - d.unusual.sales.yearAgo;
+        const netOfUnusual = {
+          sales: {
+            current: netOfUnusualSalesCur,
+            yearAgo: netOfUnusualSalesYA,
+            diffPct: netOfUnusualSalesYA !== 0 ? ((netOfUnusualSalesCur - netOfUnusualSalesYA) / Math.abs(netOfUnusualSalesYA)) * 100 : 0,
+            diffVal: netOfUnusualSalesCur - netOfUnusualSalesYA
+          },
+          trx: null, basket: null
+        };
+        return \`
+          \${metricsRow('UnCarded with Unusual', uncardedWithUnusual)}
+          \${salesOnlyRow('UnUsual Transaction', d.unusual,
+            sob(d.unusual.sales.current, totalSalesCur),
+            sob(d.unusual.sales.yearAgo, totalSalesYA))}
+          \${metricsRow('Total Uncarded', totalUncarded)}
+          \${salesOnlyRow('Net of Unusual', netOfUnusual)}
+        \`;
+      })()}
     \`;
   }
 
@@ -939,11 +959,17 @@ const html = `<!DOCTYPE html>
   }
 
   // Subtract b from a (a - b), recompute basket
+  // Subtract b from a. If b has null trx (e.g. Unusual), treat as zero.
   function buildSubtract(a, b) {
-    const sCur = a.sales.current - b.sales.current;
-    const sYA  = a.sales.yearAgo - b.sales.yearAgo;
-    const tCur = a.trx.current - b.trx.current;
-    const tYA  = a.trx.yearAgo - b.trx.yearAgo;
+    const bSalesCur = b.sales ? b.sales.current : 0;
+    const bSalesYA  = b.sales ? b.sales.yearAgo : 0;
+    const bTrxCur   = b.trx   ? b.trx.current   : 0;
+    const bTrxYA    = b.trx   ? b.trx.yearAgo   : 0;
+
+    const sCur = a.sales.current - bSalesCur;
+    const sYA  = a.sales.yearAgo - bSalesYA;
+    const tCur = a.trx.current - bTrxCur;
+    const tYA  = a.trx.yearAgo - bTrxYA;
     const bCur = tCur !== 0 ? sCur / tCur : 0;
     const bYA  = tYA !== 0 ? sYA / tYA : 0;
     const dp = (c, y) => y !== 0 ? ((c - y) / Math.abs(y)) * 100 : 0;
