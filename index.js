@@ -108,8 +108,93 @@ app.get('/api/data', async (req, res) => {
       if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
     });
 
-    // Pre-detect Top200 sections (global, doesn't depend on storeId)
     const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+    // Helpers
+    const passMonth = (m) => !month || (m || '').toString().trim().toLowerCase() === month.toLowerCase();
+    const passArea  = (sid) => !area || (storeAreaMap[sid] || '').toLowerCase() === area.toLowerCase();
+    const emptyMetric = () => ({ sC: 0, sY: 0, tC: 0, tY: 0 });
+    const addInto = (target, src) => {
+      target.sC += src.sC; target.sY += src.sY;
+      target.tC += src.tC; target.tY += src.tY;
+    };
+    const toMetricObj = (m) => buildMetrics(m.sC, m.sY, m.tC, m.tY);
+
+    // ----- ONE-PASS INDEXING PER SHEET -----
+    // SalesData -> by storeId
+    const salesIdx = {};
+    let salesValidRows = 0;
+    salesRows.slice(1).forEach(cols => {
+      if (!cols[5] || cols[5].trim() === '') return;
+      if (!passMonth(cols[0])) return;
+      const sid = (cols[3] || '').trim();
+      if (!sid) return;
+      if (!salesIdx[sid]) salesIdx[sid] = emptyMetric();
+      salesIdx[sid].sC += num(cols[5]);
+      salesIdx[sid].sY += num(cols[6]);
+      salesIdx[sid].tC += num(cols[12]);
+      salesIdx[sid].tY += num(cols[14]);
+      salesValidRows++;
+    });
+
+    // ShopperMetrics -> by [type][storeId]
+    const normalize = s => (s || '').trim().toUpperCase().replace(/[\s._-]/g, '');
+    const shopperHeadersNorm = shopperRows[0].map(normalize);
+    const sColIdx = (name) => shopperHeadersNorm.indexOf(normalize(name));
+    const SHOP_TYPE_COL    = sColIdx('TYPE');
+    const SHOP_MONTH_COL   = sColIdx('Month');
+    const SHOP_STOREID_COL = sColIdx('STOREID');
+    const SHOP_SALES_COL   = sColIdx('Sales');
+    const SHOP_SALESLY_COL = sColIdx('SalesLY');
+    const SHOP_TRX_COL     = sColIdx('TRXCount');
+    const SHOP_TRXLY_COL   = sColIdx('TRXCountLY');
+
+    const shopperIdx = { TNAP: {}, KAIN: {}, PERKS: {}, 'PAG-IBIG': {} };
+    shopperRows.slice(1).forEach(cols => {
+      if (SHOP_TYPE_COL < 0) return;
+      const type = (cols[SHOP_TYPE_COL] || '').trim().toUpperCase();
+      if (!shopperIdx[type]) return;
+      if (!passMonth(SHOP_MONTH_COL >= 0 ? cols[SHOP_MONTH_COL] : '')) return;
+      const sid = SHOP_STOREID_COL >= 0 ? (cols[SHOP_STOREID_COL] || '').trim() : '';
+      if (!sid) return;
+      const idx = shopperIdx[type];
+      if (!idx[sid]) idx[sid] = emptyMetric();
+      if (SHOP_SALES_COL   >= 0) idx[sid].sC += num(cols[SHOP_SALES_COL]);
+      if (SHOP_SALESLY_COL >= 0) idx[sid].sY += num(cols[SHOP_SALESLY_COL]);
+      if (SHOP_TRX_COL     >= 0) idx[sid].tC += num(cols[SHOP_TRX_COL]);
+      if (SHOP_TRXLY_COL   >= 0) idx[sid].tY += num(cols[SHOP_TRXLY_COL]);
+    });
+
+    // APAR -> by storeId
+    const aparIdx = {};
+    aparRows.slice(1).forEach(cols => {
+      if (!passMonth(cols[0])) return;
+      const sid = (cols[2] || '').trim();
+      if (!sid) return;
+      if (!aparIdx[sid]) aparIdx[sid] = emptyMetric();
+      aparIdx[sid].sC += num(cols[6]);
+      aparIdx[sid].sY += num(cols[7]);
+      aparIdx[sid].tC += num(cols[8]);
+      aparIdx[sid].tY += num(cols[9]);
+    });
+
+    // GEG -> by [level][storeId]
+    const gegIdx = { Gold: {}, Elite: {}, Green: {} };
+    gegRows.slice(1).forEach(cols => {
+      const level = (cols[4] || '').trim();
+      const levelKey = Object.keys(gegIdx).find(k => k.toLowerCase() === level.toLowerCase());
+      if (!levelKey) return;
+      if (!passMonth(cols[0])) return;
+      const sid = (cols[2] || '').trim();
+      if (!sid) return;
+      if (!gegIdx[levelKey][sid]) gegIdx[levelKey][sid] = emptyMetric();
+      gegIdx[levelKey][sid].sC += num(cols[5]);
+      gegIdx[levelKey][sid].sY += num(cols[6]);
+      gegIdx[levelKey][sid].tC += num(cols[7]);
+      gegIdx[levelKey][sid].tY += num(cols[8]);
+    });
+
+    // Top200 -> by storeId (sales + trx separate)
     const YA_COL_START  = 6;
     const CUR_COL_START = 22;
     const headerIndices = [];
@@ -123,150 +208,108 @@ app.get('/api/data', async (req, res) => {
     const t200TrxStart   = headerIndices.length >= 2 ? headerIndices[1] + 1 : -1;
     const t200TrxEnd     = top200Rows.length - 1;
 
-    // Pre-detect ShopperMetrics column indices
-    const normalize = s => (s || '').trim().toUpperCase().replace(/[\s._-]/g, '');
-    const shopperHeadersNorm = shopperRows[0].map(normalize);
-    const sColIdx = (name) => shopperHeadersNorm.indexOf(normalize(name));
-    const SHOP_TYPE_COL     = sColIdx('TYPE');
-    const SHOP_MONTH_COL    = sColIdx('Month');
-    const SHOP_STOREID_COL  = sColIdx('STOREID');
-    const SHOP_SALES_COL    = sColIdx('Sales');
-    const SHOP_SALESLY_COL  = sColIdx('SalesLY');
-    const SHOP_TRX_COL      = sColIdx('TRXCount');
-    const SHOP_TRXLY_COL    = sColIdx('TRXCountLY');
-
-    // ----- Reusable metric computation per store (or aggregate when storeIdFilter is null/empty) -----
-    function computeMetrics(storeIdFilter) {
-      const mArea    = (sid) => !area || (storeAreaMap[sid] || '').toLowerCase() === area.toLowerCase();
-      const mMonth   = (m) => !month || (m || '').trim().toLowerCase() === month.toLowerCase();
-      const mStoreId = (sid) => !storeIdFilter || (sid || '').trim() === storeIdFilter.trim();
-
-      // SalesData -> Total Sales
-      let sC = 0, sY = 0, tC = 0, tY = 0, validRows = 0;
-      salesRows.slice(1).forEach(cols => {
-        if (!cols[5] || cols[5].trim() === '') return;
-        const rowStoreId = (cols[3] || '').trim();
-        if (!mMonth(cols[0])) return;
-        if (!mStoreId(rowStoreId)) return;
-        if (!mArea(rowStoreId)) return;
-        sC += num(cols[5]); sY += num(cols[6]);
-        tC += num(cols[12]); tY += num(cols[14]);
-        validRows++;
-      });
-      const totalSales = buildMetrics(sC, sY, tC, tY);
-
-      // ShopperMetrics -> TNAP, KAIN, PERKS, PAG-IBIG
-      function sumByType(typeFilter) {
-        let salesCur = 0, salesYA = 0, trxCur = 0, trxYA = 0;
-        shopperRows.slice(1).forEach(cols => {
-          if (SHOP_TYPE_COL < 0) return;
-          if ((cols[SHOP_TYPE_COL] || '').trim().toUpperCase() !== typeFilter.toUpperCase()) return;
-          const rowStoreId = SHOP_STOREID_COL >= 0 ? (cols[SHOP_STOREID_COL] || '').trim() : '';
-          if (!mMonth(SHOP_MONTH_COL >= 0 ? cols[SHOP_MONTH_COL] : '')) return;
-          if (!mStoreId(rowStoreId)) return;
-          if (!mArea(rowStoreId)) return;
-          if (SHOP_SALES_COL   >= 0) salesCur += num(cols[SHOP_SALES_COL]);
-          if (SHOP_SALESLY_COL >= 0) salesYA  += num(cols[SHOP_SALESLY_COL]);
-          if (SHOP_TRX_COL     >= 0) trxCur   += num(cols[SHOP_TRX_COL]);
-          if (SHOP_TRXLY_COL   >= 0) trxYA    += num(cols[SHOP_TRXLY_COL]);
-        });
-        return buildMetrics(salesCur, salesYA, trxCur, trxYA);
-      }
-      const tnap    = sumByType('TNAP');
-      const kain    = sumByType('KAIN');
-      const perks   = sumByType('PERKS');
-      const pagibig = sumByType('PAG-IBIG');
-
-      // APAR
-      let aSC = 0, aSY = 0, aTC = 0, aTY = 0;
-      aparRows.slice(1).forEach(cols => {
-        const rowStoreId = (cols[2] || '').trim();
-        if (!mMonth(cols[0])) return;
-        if (!mStoreId(rowStoreId)) return;
-        if (!mArea(rowStoreId)) return;
-        aSC += num(cols[6]); aSY += num(cols[7]);
-        aTC += num(cols[8]); aTY += num(cols[9]);
-      });
-      const apar = buildMetrics(aSC, aSY, aTC, aTY);
-
-      // GEG -> Gold, Elite, Green
-      function sumGEG(levelFilter) {
-        let sCx = 0, sYx = 0, tCx = 0, tYx = 0;
-        gegRows.slice(1).forEach(cols => {
-          if ((cols[4] || '').trim().toUpperCase() !== levelFilter.toUpperCase()) return;
-          const rowStoreId = (cols[2] || '').trim();
-          if (!mMonth(cols[0])) return;
-          if (!mStoreId(rowStoreId)) return;
-          if (!mArea(rowStoreId)) return;
-          sCx += num(cols[5]); sYx += num(cols[6]);
-          tCx += num(cols[7]); tYx += num(cols[8]);
-        });
-        return buildMetrics(sCx, sYx, tCx, tYx);
-      }
-      const gold  = sumGEG('Gold');
-      const elite = sumGEG('Elite');
-      const green = sumGEG('Green');
-
-      // Top200
-      function sumTop200(start, end) {
+    function indexTop200(start, end, isTrx) {
+      const idx = {};
+      if (start < 0) return idx;
+      const monthIdx = month ? MONTHS.findIndex(m => m.toLowerCase() === month.toLowerCase()) : -1;
+      for (let i = start; i <= end && i < top200Rows.length; i++) {
+        const r = top200Rows[i];
+        if (!r || !r[2]) continue;
+        const sid = (r[2] || '').trim();
+        if (isNaN(parseFloat(sid))) continue;
         let cur = 0, ya = 0;
-        if (start < 0) return { cur, ya };
-        for (let i = start; i <= end && i < top200Rows.length; i++) {
-          const r = top200Rows[i];
-          if (!r || !r[2]) continue;
-          const sid = (r[2] || '').trim();
-          if (isNaN(parseFloat(sid))) continue;
-          if (!mStoreId(sid)) continue;
-          if (!mArea(sid)) continue;
-          let monthIndices;
-          if (month) {
-            const mIdx = MONTHS.findIndex(m => m.toLowerCase() === month.toLowerCase());
-            if (mIdx < 0) continue;
-            monthIndices = [mIdx];
-          } else {
-            monthIndices = [];
-            for (let m = 0; m < 12; m++) if (num(r[CUR_COL_START + m]) > 0) monthIndices.push(m);
+        if (month) {
+          if (monthIdx < 0) continue;
+          cur = num(r[CUR_COL_START + monthIdx]);
+          ya  = num(r[YA_COL_START + monthIdx]);
+        } else {
+          for (let m = 0; m < 12; m++) {
+            if (num(r[CUR_COL_START + m]) > 0) {
+              cur += num(r[CUR_COL_START + m]);
+              ya  += num(r[YA_COL_START + m]);
+            }
           }
-          monthIndices.forEach(m => {
-            cur += num(r[CUR_COL_START + m]);
-            ya  += num(r[YA_COL_START + m]);
-          });
         }
-        return { cur, ya };
+        if (!idx[sid]) idx[sid] = emptyMetric();
+        if (isTrx) { idx[sid].tC += cur; idx[sid].tY += ya; }
+        else       { idx[sid].sC += cur; idx[sid].sY += ya; }
       }
-      const t200S = sumTop200(t200SalesStart, t200SalesEnd);
-      const t200T = sumTop200(t200TrxStart, t200TrxEnd);
-      const top200 = buildMetrics(t200S.cur, t200S.ya, t200T.cur, t200T.ya);
+      return idx;
+    }
+    const top200SalesIdx = indexTop200(t200SalesStart, t200SalesEnd, false);
+    const top200TrxIdx   = indexTop200(t200TrxStart, t200TrxEnd, true);
 
-      // Unusual
-      function sumUnusual(rows) {
-        let total = 0;
-        rows.slice(1).forEach(cols => {
-          if (!cols || cols.length < 7) return;
-          const rowArea    = (cols[0] || '').trim();
-          const rowStoreId = (cols[1] || '').trim();
-          const rowMonth   = cols[3];
-          if (area  && rowArea.toLowerCase() !== area.toLowerCase()) return;
-          if (storeIdFilter && rowStoreId !== storeIdFilter.trim()) return;
-          if (month && (rowMonth || '').trim().toLowerCase() !== month.toLowerCase()) return;
-          total += num(cols[6]);
-        });
-        return total;
-      }
-      const uCur = sumUnusual(unusualCurRows);
-      const uYA  = sumUnusual(unusualYARows);
+    // Unusual -> by storeId (sales only)
+    function indexUnusual(rows) {
+      const idx = {};
+      rows.slice(1).forEach(cols => {
+        if (!cols || cols.length < 7) return;
+        const rowArea = (cols[0] || '').trim();
+        // Note: Unusual filter by area uses row's own area column (not store map)
+        if (area && rowArea.toLowerCase() !== area.toLowerCase()) return;
+        if (!passMonth(cols[3])) return;
+        const sid = (cols[1] || '').trim();
+        if (!sid) return;
+        if (!idx[sid]) idx[sid] = 0;
+        idx[sid] += num(cols[6]);
+      });
+      return idx;
+    }
+    const unusualCurIdx = indexUnusual(unusualCurRows);
+    const unusualYAIdx  = indexUnusual(unusualYARows);
+
+    // ----- FAST AGGREGATION FROM INDEXES -----
+    // Get metrics for one store, OR for many stores (aggregate)
+    function getStoreSet(storeIdFilter) {
+      // Build list of store IDs that pass area/storeId filters
+      if (storeIdFilter) return [storeIdFilter];
+      // All stores known (use storeAreaMap keys, optionally filtered by area)
+      return Object.keys(storeAreaMap).filter(sid => passArea(sid));
+    }
+
+    function aggIdx(idx, storeIds) {
+      const out = emptyMetric();
+      storeIds.forEach(sid => { if (idx[sid]) addInto(out, idx[sid]); });
+      return out;
+    }
+    function aggIdxScalar(idx, storeIds) {
+      let total = 0;
+      storeIds.forEach(sid => { if (idx[sid]) total += idx[sid]; });
+      return total;
+    }
+
+    function computeMetrics(storeIdFilter) {
+      const stores = getStoreSet(storeIdFilter);
+
+      const totalSales = toMetricObj(aggIdx(salesIdx, stores));
+      const tnap       = toMetricObj(aggIdx(shopperIdx.TNAP, stores));
+      const kain       = toMetricObj(aggIdx(shopperIdx.KAIN, stores));
+      const perks      = toMetricObj(aggIdx(shopperIdx.PERKS, stores));
+      const pagibig    = toMetricObj(aggIdx(shopperIdx['PAG-IBIG'], stores));
+      const apar       = toMetricObj(aggIdx(aparIdx, stores));
+      const gold       = toMetricObj(aggIdx(gegIdx.Gold, stores));
+      const elite      = toMetricObj(aggIdx(gegIdx.Elite, stores));
+      const green      = toMetricObj(aggIdx(gegIdx.Green, stores));
+
+      // Top200: combine sales + trx indexes
+      const top200Sales = aggIdx(top200SalesIdx, stores);
+      const top200Trx   = aggIdx(top200TrxIdx, stores);
+      const top200 = buildMetrics(top200Sales.sC, top200Sales.sY, top200Trx.tC, top200Trx.tY);
+
+      const uCur = aggIdxScalar(unusualCurIdx, stores);
+      const uYA  = aggIdxScalar(unusualYAIdx, stores);
       const unusual = {
         sales: { current: uCur, yearAgo: uYA, diffPct: diffPct(uCur, uYA), diffVal: diffVal(uCur, uYA) },
         trx: null, basket: null
       };
 
-      return { totalSales, tnap, kain, perks, pagibig, apar, gold, elite, green, top200, unusual, validRows };
+      return { totalSales, tnap, kain, perks, pagibig, apar, gold, elite, green, top200, unusual };
     }
 
-    // Aggregate metrics (uses the user's filters)
+    // Aggregate (uses user filters)
     const agg = computeMetrics(storeId);
 
-    // Per-store breakdown (one row per store in the filtered area)
+    // Per-store breakdown
     const storeList = storeRows.slice(1)
       .filter(r => r[3] && r[3].trim() !== '')
       .filter(r => !area || (r[2] || '').toLowerCase() === area.toLowerCase());
@@ -279,7 +322,7 @@ app.get('/api/data', async (req, res) => {
 
     res.json({
       ok: true,
-      rowCount: agg.validRows,
+      rowCount: salesValidRows,
       filters: { area: area || null, storeId: storeId || null, month: month || null },
       totalSales: agg.totalSales,
       tnap: agg.tnap,
