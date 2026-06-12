@@ -100,243 +100,199 @@ app.get('/api/data', async (req, res) => {
 
     // Build a Store ID → Area lookup map (from ListOfStores)
     const storeAreaMap = {};
+    const storeNameMap = {};
     storeRows.slice(1).forEach(r => {
       const sid = (r[3] || '').trim();
       const ar  = (r[2] || '').trim();
-      if (sid) storeAreaMap[sid] = ar;
+      const nm  = (r[4] || '').trim();
+      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
     });
 
-    // Filter helpers
-    const matchArea    = (storeId) => !area || (storeAreaMap[storeId] || '').toLowerCase() === area.toLowerCase();
-    const matchStore   = (storeId) => !storeId || true; // (placeholder, used below differently)
-    const matchMonth   = (m) => !month || (m || '').trim().toLowerCase() === month.toLowerCase();
-    const matchStoreId = (sid) => !storeId || (sid || '').trim() === storeId.trim();
-
-    // ===== SalesData: Total Sales =====
-    // SalesData cols: A=0 MONTH, D=3 STORE ID, F=5 SALES MTD, G=6 SALES MTD YA, M=12 TRX MTD, O=14 TRX MTD YA
-    const salesData = salesRows.slice(1);
-    let sCur = 0, sYA = 0, tCur = 0, tYA = 0, validRows = 0;
-    salesData.forEach(cols => {
-      if (!cols[5] || cols[5].trim() === '') return;
-      const rowMonth   = cols[0];
-      const rowStoreId = (cols[3] || '').trim();
-      if (!matchMonth(rowMonth)) return;
-      if (!matchStoreId(rowStoreId)) return;
-      if (!matchArea(rowStoreId)) return;
-      sCur += num(cols[5]);
-      sYA  += num(cols[6]);
-      tCur += num(cols[12]);
-      tYA  += num(cols[14]);
-      validRows++;
-    });
-    const totalSalesMetrics = buildMetrics(sCur, sYA, tCur, tYA);
-
-    // ===== ShopperMetricsData: TNAP, KAIN, PERKS, PAG-IBIG =====
-    const normalize = s => (s || '').trim().toUpperCase().replace(/[\s._-]/g, '');
-    const shopperHeadersNorm = shopperRows[0].map(normalize);
-    const colIdx = (name) => shopperHeadersNorm.indexOf(normalize(name));
-
-    const typeCol     = colIdx('TYPE');
-    const monthCol    = colIdx('Month');    // E in your reference
-    const storeIdCol  = colIdx('STOREID');  // C
-    const salesCol    = colIdx('Sales');
-    const salesLYCol  = colIdx('SalesLY');
-    const trxCol      = colIdx('TRXCount');
-    const trxLYCol    = colIdx('TRXCountLY');
-
-    const shopperData = shopperRows.slice(1);
-
-    function sumByType(typeFilter) {
-      let salesCur = 0, salesYA = 0, trxCur = 0, trxYA = 0, matchCount = 0;
-      shopperData.forEach(cols => {
-        if (typeCol < 0) return;
-        const type = (cols[typeCol] || '').trim().toUpperCase();
-        if (type !== typeFilter.toUpperCase()) return;
-
-        // Apply filters
-        const rowMonth   = monthCol   >= 0 ? cols[monthCol]   : '';
-        const rowStoreId = storeIdCol >= 0 ? (cols[storeIdCol] || '').trim() : '';
-        if (!matchMonth(rowMonth)) return;
-        if (!matchStoreId(rowStoreId)) return;
-        if (!matchArea(rowStoreId)) return;
-
-        matchCount++;
-        if (salesCol   >= 0) salesCur += num(cols[salesCol]);
-        if (salesLYCol >= 0) salesYA  += num(cols[salesLYCol]);
-        if (trxCol     >= 0) trxCur   += num(cols[trxCol]);
-        if (trxLYCol   >= 0) trxYA    += num(cols[trxLYCol]);
-      });
-      const m = buildMetrics(salesCur, salesYA, trxCur, trxYA);
-      m.matchCount = matchCount;
-      return m;
-    }
-
-    const tnapMetrics    = sumByType('TNAP');
-    const kainMetrics    = sumByType('KAIN');
-    const perksMetrics   = sumByType('PERKS');
-    const pagibigMetrics = sumByType('PAG-IBIG');
-
-    // ===== APAR sheet =====
-    // A=0 Month, C=2 Store ID, G=6 Sales, H=7 Sales YA, I=8 Trx, J=9 Trx YA
-    const aparData = aparRows.slice(1);
-    let aSalesCur = 0, aSalesYA = 0, aTrxCur = 0, aTrxYA = 0;
-    aparData.forEach(cols => {
-      const rowMonth   = cols[0];
-      const rowStoreId = (cols[2] || '').trim();
-      if (!matchMonth(rowMonth)) return;
-      if (!matchStoreId(rowStoreId)) return;
-      if (!matchArea(rowStoreId)) return;
-      aSalesCur += num(cols[6]);
-      aSalesYA  += num(cols[7]);
-      aTrxCur   += num(cols[8]);
-      aTrxYA    += num(cols[9]);
-    });
-    const aparMetrics = buildMetrics(aSalesCur, aSalesYA, aTrxCur, aTrxYA);
-
-    // ===== GEG sheet (Gold, Elite, Green) =====
-    // A=0 Month, C=2 Store ID, E=4 Customer Level, F=5 Sales, G=6 Sales YA, H=7 TRX, I=8 TRX LY
-    const gegData = gegRows.slice(1);
-    function sumGEG(levelFilter) {
-      let sCur = 0, sYA = 0, trxCur = 0, trxYA = 0;
-      gegData.forEach(cols => {
-        const level = (cols[4] || '').trim().toUpperCase();
-        if (level !== levelFilter.toUpperCase()) return;
-        const rowMonth   = cols[0];
-        const rowStoreId = (cols[2] || '').trim();
-        if (!matchMonth(rowMonth)) return;
-        if (!matchStoreId(rowStoreId)) return;
-        if (!matchArea(rowStoreId)) return;
-        sCur   += num(cols[5]);
-        sYA    += num(cols[6]);
-        trxCur += num(cols[7]);
-        trxYA  += num(cols[8]);
-      });
-      return buildMetrics(sCur, sYA, trxCur, trxYA);
-    }
-
-    const goldMetrics  = sumGEG('Gold');
-    const eliteMetrics = sumGEG('Elite');
-    const greenMetrics = sumGEG('Green');
-
-    // ===== Top200 sheet =====
-    // Has TWO sections: Sales (top), TRX (bottom), with identical column structure.
-    // Find the TRX section by locating the SECOND header row (col C = "STOREID").
-    // Column layout (same for both sections):
-    //   C=2 StoreID, G-R = 6-17: Jan_YA...Dec_YA, W-AH = 22-33: Jan_Current...Dec_Current
+    // Pre-detect Top200 sections (global, doesn't depend on storeId)
     const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const YA_COL_START  = 6;
     const CUR_COL_START = 22;
-
-    // Find header row indices (where col C looks like a header: "STOREID", "STORE ID", etc.)
     const headerIndices = [];
     top200Rows.forEach((r, i) => {
       const c = (r && r[2] || '').toString().trim().toUpperCase().replace(/[\s_]/g, '');
       const a = (r && r[0] || '').toString().trim().toUpperCase();
       if (c === 'STOREID' || a === 'REGION') headerIndices.push(i);
     });
+    const t200SalesStart = 1;
+    const t200SalesEnd   = headerIndices.length >= 2 ? headerIndices[1] - 1 : top200Rows.length - 1;
+    const t200TrxStart   = headerIndices.length >= 2 ? headerIndices[1] + 1 : -1;
+    const t200TrxEnd     = top200Rows.length - 1;
 
-    // Sales section: from index 1 to just before TRX header (or end if no second header)
-    const salesStart = 1;
-    const salesEnd   = headerIndices.length >= 2 ? headerIndices[1] - 1 : top200Rows.length - 1;
-    // TRX section: from row after second header to end
-    const trxStart   = headerIndices.length >= 2 ? headerIndices[1] + 1 : -1;
-    const trxEnd     = top200Rows.length - 1;
+    // Pre-detect ShopperMetrics column indices
+    const normalize = s => (s || '').trim().toUpperCase().replace(/[\s._-]/g, '');
+    const shopperHeadersNorm = shopperRows[0].map(normalize);
+    const sColIdx = (name) => shopperHeadersNorm.indexOf(normalize(name));
+    const SHOP_TYPE_COL     = sColIdx('TYPE');
+    const SHOP_MONTH_COL    = sColIdx('Month');
+    const SHOP_STOREID_COL  = sColIdx('STOREID');
+    const SHOP_SALES_COL    = sColIdx('Sales');
+    const SHOP_SALESLY_COL  = sColIdx('SalesLY');
+    const SHOP_TRX_COL      = sColIdx('TRXCount');
+    const SHOP_TRXLY_COL    = sColIdx('TRXCountLY');
 
-    function sumTop200Section(rows, startIdx, endIdx) {
-      let cur = 0, ya = 0, rowCount = 0;
-      if (startIdx < 0) return { cur, ya, rowCount };
-      for (let i = startIdx; i <= endIdx && i < rows.length; i++) {
-        const r = rows[i];
-        if (!r || !r[2]) continue;
-        const rowStoreId = (r[2] || '').trim();
-        // Skip rows where Store ID isn't a number (header rows, blank rows)
-        if (isNaN(parseFloat(rowStoreId))) continue;
-        if (!matchStoreId(rowStoreId)) continue;
-        if (!matchArea(rowStoreId)) continue;
+    // ----- Reusable metric computation per store (or aggregate when storeIdFilter is null/empty) -----
+    function computeMetrics(storeIdFilter) {
+      const mArea    = (sid) => !area || (storeAreaMap[sid] || '').toLowerCase() === area.toLowerCase();
+      const mMonth   = (m) => !month || (m || '').trim().toLowerCase() === month.toLowerCase();
+      const mStoreId = (sid) => !storeIdFilter || (sid || '').trim() === storeIdFilter.trim();
 
-        let monthIndices;
-        if (month) {
-          const mIdx = MONTHS.findIndex(m => m.toLowerCase() === month.toLowerCase());
-          if (mIdx < 0) continue;
-          monthIndices = [mIdx];
-        } else {
-          monthIndices = [];
-          for (let m = 0; m < 12; m++) {
-            if (num(r[CUR_COL_START + m]) > 0) monthIndices.push(m);
-          }
-        }
-
-        monthIndices.forEach(m => {
-          cur += num(r[CUR_COL_START + m]);
-          ya  += num(r[YA_COL_START + m]);
-        });
-        rowCount++;
-      }
-      return { cur, ya, rowCount };
-    }
-
-    const top200Sales = sumTop200Section(top200Rows, salesStart, salesEnd);
-    const top200Trx   = sumTop200Section(top200Rows, trxStart, trxEnd);
-
-    const top200Metrics = buildMetrics(top200Sales.cur, top200Sales.ya, top200Trx.cur, top200Trx.ya);
-
-    // ===== Unusual Transactions (Current + Year Ago) =====
-    // Both sheets: A=0 Area, B=1 Store ID, C=2 Store Name, D=3 Month, E=4 Day,
-    //              F=5 Customer Name, G=6 Amount, H=7 Type, I=8 Carded, J=9 Desc, K=10 Remarks
-    function sumUnusual(rows) {
-      let total = 0;
-      const data = rows.slice(1); // skip header
-      data.forEach(cols => {
-        if (!cols || cols.length < 7) return;
-        const rowArea    = (cols[0] || '').trim();
-        const rowStoreId = (cols[1] || '').trim();
-        const rowMonth   = cols[3];
-        if (area    && rowArea.toLowerCase()    !== area.toLowerCase())    return;
-        if (storeId && rowStoreId               !== storeId.trim())         return;
-        if (month   && (rowMonth || '').trim().toLowerCase() !== month.toLowerCase()) return;
-        total += num(cols[6]); // G - Amount
+      // SalesData -> Total Sales
+      let sC = 0, sY = 0, tC = 0, tY = 0, validRows = 0;
+      salesRows.slice(1).forEach(cols => {
+        if (!cols[5] || cols[5].trim() === '') return;
+        const rowStoreId = (cols[3] || '').trim();
+        if (!mMonth(cols[0])) return;
+        if (!mStoreId(rowStoreId)) return;
+        if (!mArea(rowStoreId)) return;
+        sC += num(cols[5]); sY += num(cols[6]);
+        tC += num(cols[12]); tY += num(cols[14]);
+        validRows++;
       });
-      return total;
+      const totalSales = buildMetrics(sC, sY, tC, tY);
+
+      // ShopperMetrics -> TNAP, KAIN, PERKS, PAG-IBIG
+      function sumByType(typeFilter) {
+        let salesCur = 0, salesYA = 0, trxCur = 0, trxYA = 0;
+        shopperRows.slice(1).forEach(cols => {
+          if (SHOP_TYPE_COL < 0) return;
+          if ((cols[SHOP_TYPE_COL] || '').trim().toUpperCase() !== typeFilter.toUpperCase()) return;
+          const rowStoreId = SHOP_STOREID_COL >= 0 ? (cols[SHOP_STOREID_COL] || '').trim() : '';
+          if (!mMonth(SHOP_MONTH_COL >= 0 ? cols[SHOP_MONTH_COL] : '')) return;
+          if (!mStoreId(rowStoreId)) return;
+          if (!mArea(rowStoreId)) return;
+          if (SHOP_SALES_COL   >= 0) salesCur += num(cols[SHOP_SALES_COL]);
+          if (SHOP_SALESLY_COL >= 0) salesYA  += num(cols[SHOP_SALESLY_COL]);
+          if (SHOP_TRX_COL     >= 0) trxCur   += num(cols[SHOP_TRX_COL]);
+          if (SHOP_TRXLY_COL   >= 0) trxYA    += num(cols[SHOP_TRXLY_COL]);
+        });
+        return buildMetrics(salesCur, salesYA, trxCur, trxYA);
+      }
+      const tnap    = sumByType('TNAP');
+      const kain    = sumByType('KAIN');
+      const perks   = sumByType('PERKS');
+      const pagibig = sumByType('PAG-IBIG');
+
+      // APAR
+      let aSC = 0, aSY = 0, aTC = 0, aTY = 0;
+      aparRows.slice(1).forEach(cols => {
+        const rowStoreId = (cols[2] || '').trim();
+        if (!mMonth(cols[0])) return;
+        if (!mStoreId(rowStoreId)) return;
+        if (!mArea(rowStoreId)) return;
+        aSC += num(cols[6]); aSY += num(cols[7]);
+        aTC += num(cols[8]); aTY += num(cols[9]);
+      });
+      const apar = buildMetrics(aSC, aSY, aTC, aTY);
+
+      // GEG -> Gold, Elite, Green
+      function sumGEG(levelFilter) {
+        let sCx = 0, sYx = 0, tCx = 0, tYx = 0;
+        gegRows.slice(1).forEach(cols => {
+          if ((cols[4] || '').trim().toUpperCase() !== levelFilter.toUpperCase()) return;
+          const rowStoreId = (cols[2] || '').trim();
+          if (!mMonth(cols[0])) return;
+          if (!mStoreId(rowStoreId)) return;
+          if (!mArea(rowStoreId)) return;
+          sCx += num(cols[5]); sYx += num(cols[6]);
+          tCx += num(cols[7]); tYx += num(cols[8]);
+        });
+        return buildMetrics(sCx, sYx, tCx, tYx);
+      }
+      const gold  = sumGEG('Gold');
+      const elite = sumGEG('Elite');
+      const green = sumGEG('Green');
+
+      // Top200
+      function sumTop200(start, end) {
+        let cur = 0, ya = 0;
+        if (start < 0) return { cur, ya };
+        for (let i = start; i <= end && i < top200Rows.length; i++) {
+          const r = top200Rows[i];
+          if (!r || !r[2]) continue;
+          const sid = (r[2] || '').trim();
+          if (isNaN(parseFloat(sid))) continue;
+          if (!mStoreId(sid)) continue;
+          if (!mArea(sid)) continue;
+          let monthIndices;
+          if (month) {
+            const mIdx = MONTHS.findIndex(m => m.toLowerCase() === month.toLowerCase());
+            if (mIdx < 0) continue;
+            monthIndices = [mIdx];
+          } else {
+            monthIndices = [];
+            for (let m = 0; m < 12; m++) if (num(r[CUR_COL_START + m]) > 0) monthIndices.push(m);
+          }
+          monthIndices.forEach(m => {
+            cur += num(r[CUR_COL_START + m]);
+            ya  += num(r[YA_COL_START + m]);
+          });
+        }
+        return { cur, ya };
+      }
+      const t200S = sumTop200(t200SalesStart, t200SalesEnd);
+      const t200T = sumTop200(t200TrxStart, t200TrxEnd);
+      const top200 = buildMetrics(t200S.cur, t200S.ya, t200T.cur, t200T.ya);
+
+      // Unusual
+      function sumUnusual(rows) {
+        let total = 0;
+        rows.slice(1).forEach(cols => {
+          if (!cols || cols.length < 7) return;
+          const rowArea    = (cols[0] || '').trim();
+          const rowStoreId = (cols[1] || '').trim();
+          const rowMonth   = cols[3];
+          if (area  && rowArea.toLowerCase() !== area.toLowerCase()) return;
+          if (storeIdFilter && rowStoreId !== storeIdFilter.trim()) return;
+          if (month && (rowMonth || '').trim().toLowerCase() !== month.toLowerCase()) return;
+          total += num(cols[6]);
+        });
+        return total;
+      }
+      const uCur = sumUnusual(unusualCurRows);
+      const uYA  = sumUnusual(unusualYARows);
+      const unusual = {
+        sales: { current: uCur, yearAgo: uYA, diffPct: diffPct(uCur, uYA), diffVal: diffVal(uCur, uYA) },
+        trx: null, basket: null
+      };
+
+      return { totalSales, tnap, kain, perks, pagibig, apar, gold, elite, green, top200, unusual, validRows };
     }
 
-    const unusualCurrent = sumUnusual(unusualCurRows);
-    const unusualYearAgo = sumUnusual(unusualYARows);
+    // Aggregate metrics (uses the user's filters)
+    const agg = computeMetrics(storeId);
 
-    const unusualMetrics = {
-      sales: {
-        current: unusualCurrent,
-        yearAgo: unusualYearAgo,
-        diffPct: diffPct(unusualCurrent, unusualYearAgo),
-        diffVal: diffVal(unusualCurrent, unusualYearAgo)
-      },
-      // No transaction count / basket size for unusual
-      trx:    null,
-      basket: null
-    };
+    // Per-store breakdown (one row per store in the filtered area)
+    const storeList = storeRows.slice(1)
+      .filter(r => r[3] && r[3].trim() !== '')
+      .filter(r => !area || (r[2] || '').toLowerCase() === area.toLowerCase());
+
+    const perStore = storeList.map(r => {
+      const sid  = (r[3] || '').trim();
+      const name = (r[4] || '').trim();
+      return { storeId: sid, storeName: name, metrics: computeMetrics(sid) };
+    });
 
     res.json({
       ok: true,
-      rowCount: validRows,
+      rowCount: agg.validRows,
       filters: { area: area || null, storeId: storeId || null, month: month || null },
-      totalSales: totalSalesMetrics,
-      tnap: tnapMetrics,
-      kain: kainMetrics,
-      perks: perksMetrics,
-      pagibig: pagibigMetrics,
-      apar: aparMetrics,
-      gold: goldMetrics,
-      elite: eliteMetrics,
-      green: greenMetrics,
-      top200: top200Metrics,
-      unusual: unusualMetrics,
-      _top200Debug: {
-        totalSheetRows: top200Rows.length,
-        headerIndices,
-        salesRange: [salesStart, salesEnd],
-        trxRange: [trxStart, trxEnd],
-        salesRowsCounted: top200Sales.rowCount,
-        trxRowsCounted: top200Trx.rowCount
-      }
+      totalSales: agg.totalSales,
+      tnap: agg.tnap,
+      kain: agg.kain,
+      perks: agg.perks,
+      pagibig: agg.pagibig,
+      apar: agg.apar,
+      gold: agg.gold,
+      elite: agg.elite,
+      green: agg.green,
+      top200: agg.top200,
+      unusual: agg.unusual,
+      perStore: perStore
     });
 
   } catch (err) {
@@ -578,6 +534,55 @@ const html = `<!DOCTYPE html>
     font-size: 10.5px; color: #94a094; letter-spacing: 0.4px;
   }
 
+  /* ONE PAGE SUMMARY */
+  .summary-header {
+    margin: 22px 0 10px;
+    display: flex; align-items: baseline; justify-content: space-between;
+    flex-wrap: wrap; gap: 8px;
+  }
+  .summary-header h2 {
+    color: #1B5E20; font-size: 15px; font-weight: 800;
+    letter-spacing: 0.5px;
+    padding-left: 10px; border-left: 4px solid #FFC107;
+  }
+  .summary-header .summary-sub {
+    font-size: 11px; color: #6b7570; font-weight: 500;
+  }
+  .summary-table { font-size: 11px; min-width: 100%; }
+  .summary-table thead th {
+    background: #1B5E20; color: white;
+    font-weight: 700; font-size: 10px;
+    text-align: center; padding: 9px 6px;
+    letter-spacing: 0.4px; text-transform: uppercase;
+    cursor: pointer; user-select: none;
+    position: sticky; top: 0; z-index: 1;
+    transition: background 0.15s;
+    border-right: 1px solid #2E7D32;
+  }
+  .summary-table thead th:hover { background: #2E7D32; }
+  .summary-table thead th.sortable::after {
+    content: ' ⇅'; opacity: 0.4; font-size: 9px;
+  }
+  .summary-table thead th.sort-asc::after { content: ' ↑'; opacity: 1; color: #FFC107; }
+  .summary-table thead th.sort-desc::after { content: ' ↓'; opacity: 1; color: #FFC107; }
+  .summary-table thead th.store-col { text-align: left; padding-left: 12px; }
+
+  .summary-table tbody td {
+    padding: 7px 6px; border-bottom: 1px solid #f0f2ef;
+    text-align: right; font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .summary-table tbody td.store-col {
+    text-align: left; padding-left: 12px;
+    color: #1a2e1f; font-weight: 600; white-space: nowrap;
+  }
+  .summary-table tbody tr:hover td { background: #FFF176; transition: background 0.15s; }
+  .summary-table tbody tr:nth-child(even) td { background: #fafbf9; }
+  .summary-table tbody tr:nth-child(even):hover td { background: #FFF176; }
+  .summary-table .pos { color: #2E7D32; }
+  .summary-table .neg { color: #C62828; }
+  .summary-table .empty-cell { color: #c5cdc5; font-weight: 400; }
+
   /* ============ MOBILE RESPONSIVE ============ */
 
   /* Tablet & smaller */
@@ -735,6 +740,20 @@ const html = `<!DOCTYPE html>
         <tbody id="tableBody">
           <!-- Rows will be injected by JS -->
         </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ONE PAGE SUMMARY TABLE -->
+  <div class="summary-header">
+    <h2>One Page Summary</h2>
+    <span class="summary-sub">Sales growth/decline % per store · Click column to sort</span>
+  </div>
+  <div class="table-card">
+    <div class="table-wrapper">
+      <table id="summaryTable" class="summary-table">
+        <thead id="summaryHead"></thead>
+        <tbody id="summaryBody"></tbody>
       </table>
     </div>
   </div>
@@ -995,7 +1014,123 @@ const html = `<!DOCTYPE html>
     };
   }
 
-  async function loadData() {
+  // ======= ONE PAGE SUMMARY TABLE =======
+  const SUMMARY_COLS = [
+    { key: 'store',     label: 'Stores' },
+    { key: 'total',     label: 'Total Sales', getter: m => m.totalSales.sales.diffPct },
+    { key: 'totalTnap', label: 'Total TNAP',  getter: m => combineSalesDiff(m.tnap, m.kain) },
+    { key: 'tnap',      label: 'TNAP',        getter: m => m.tnap.sales.diffPct },
+    { key: 'kain',      label: 'KAIN',        getter: m => m.kain.sales.diffPct },
+    { key: 'apar',      label: 'APAR',        getter: m => m.apar.sales.diffPct },
+    { key: 'top200',    label: 'TOP 200',     getter: m => m.top200.sales.diffPct },
+    { key: 'balanceTnap', label: 'Balance TNAP', getter: m => balanceTnapDiff(m) },
+    { key: 'gold',      label: 'Gold',        getter: m => m.gold.sales.diffPct },
+    { key: 'elite',     label: 'Elite',       getter: m => m.elite.sales.diffPct },
+    { key: 'green',     label: 'Green',       getter: m => m.green.sales.diffPct },
+    { key: 'totalGeg',  label: 'Total GEG',   getter: m => combineSalesDiff3(m.gold, m.elite, m.green) },
+    { key: 'perks',     label: 'PERKS',       getter: m => m.perks.sales.diffPct },
+    { key: 'pagibig',   label: 'PAG-IBIG',    getter: m => m.pagibig.sales.diffPct },
+    { key: 'uncardedU', label: 'Uncarded With Unusual', getter: m => uncardedUnusualDiff(m) },
+    { key: 'unusual',   label: 'Unusual Trx', getter: m => m.unusual.sales.diffPct },
+    { key: 'totalUnc',  label: 'Total Uncarded', getter: m => totalUncardedDiff(m) },
+    { key: 'netUnusual', label: 'Net of Unusual', getter: m => netOfUnusualDiff(m) }
+  ];
+
+  function combineSalesDiff(a, b) {
+    const cur = a.sales.current + b.sales.current;
+    const ya  = a.sales.yearAgo + b.sales.yearAgo;
+    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+  }
+  function combineSalesDiff3(a, b, c) {
+    const cur = a.sales.current + b.sales.current + c.sales.current;
+    const ya  = a.sales.yearAgo + b.sales.yearAgo + c.sales.yearAgo;
+    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+  }
+  function balanceTnapDiff(m) {
+    const cur = (m.tnap.sales.current + m.kain.sales.current) - m.apar.sales.current - m.top200.sales.current;
+    const ya  = (m.tnap.sales.yearAgo + m.kain.sales.yearAgo) - m.apar.sales.yearAgo - m.top200.sales.yearAgo;
+    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+  }
+  function uncardedUnusualDiff(m) {
+    const totalTnapCur = m.tnap.sales.current + m.kain.sales.current;
+    const totalTnapYA  = m.tnap.sales.yearAgo + m.kain.sales.yearAgo;
+    const cur = m.totalSales.sales.current - totalTnapCur - m.perks.sales.current - m.pagibig.sales.current;
+    const ya  = m.totalSales.sales.yearAgo - totalTnapYA - m.perks.sales.yearAgo - m.pagibig.sales.yearAgo;
+    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+  }
+  function totalUncardedDiff(m) {
+    const totalTnapCur = m.tnap.sales.current + m.kain.sales.current;
+    const totalTnapYA  = m.tnap.sales.yearAgo + m.kain.sales.yearAgo;
+    const uwuCur = m.totalSales.sales.current - totalTnapCur - m.perks.sales.current - m.pagibig.sales.current;
+    const uwuYA  = m.totalSales.sales.yearAgo - totalTnapYA  - m.perks.sales.yearAgo  - m.pagibig.sales.yearAgo;
+    const cur = uwuCur - m.unusual.sales.current;
+    const ya  = uwuYA  - m.unusual.sales.yearAgo;
+    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+  }
+  function netOfUnusualDiff(m) {
+    const cur = m.totalSales.sales.current - m.unusual.sales.current;
+    const ya  = m.totalSales.sales.yearAgo - m.unusual.sales.yearAgo;
+    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : 0;
+  }
+
+  let summarySort = { col: null, asc: true };
+  let summaryData = [];
+
+  function buildSummaryTable(data) {
+    summaryData = (data.perStore || []).slice();
+
+    const head = document.getElementById('summaryHead');
+    head.innerHTML = '<tr>' + SUMMARY_COLS.map((c, idx) => {
+      const cls = ['sortable'];
+      if (c.key === 'store') cls.push('store-col');
+      if (summarySort.col === idx) cls.push(summarySort.asc ? 'sort-asc' : 'sort-desc');
+      return \`<th class="\${cls.join(' ')}" onclick="sortSummary(\${idx})">\${c.label}</th>\`;
+    }).join('') + '</tr>';
+
+    let rows = summaryData.slice();
+    if (summarySort.col !== null) {
+      const col = SUMMARY_COLS[summarySort.col];
+      rows.sort((a, b) => {
+        if (col.key === 'store') {
+          const va = a.storeName.toLowerCase();
+          const vb = b.storeName.toLowerCase();
+          return summarySort.asc ? va.localeCompare(vb) : vb.localeCompare(va);
+        }
+        let va = col.getter(a.metrics);
+        let vb = col.getter(b.metrics);
+        if (isNaN(va) || !isFinite(va)) va = -Infinity;
+        if (isNaN(vb) || !isFinite(vb)) vb = -Infinity;
+        return summarySort.asc ? va - vb : vb - va;
+      });
+    }
+
+    const body = document.getElementById('summaryBody');
+    body.innerHTML = rows.map(r => {
+      const cells = SUMMARY_COLS.map(c => {
+        if (c.key === 'store') {
+          return \`<td class="store-col">\${r.storeName || r.storeId}</td>\`;
+        }
+        const v = c.getter(r.metrics);
+        if (v === null || v === undefined || isNaN(v) || !isFinite(v) || v === 0) {
+          return \`<td class="empty-cell">—</td>\`;
+        }
+        const cls = v >= 0 ? 'pos' : 'neg';
+        const sign = v >= 0 ? '+' : '';
+        return \`<td class="\${cls}">\${sign}\${v.toFixed(2)}%</td>\`;
+      }).join('');
+      return \`<tr>\${cells}</tr>\`;
+    }).join('');
+  }
+
+  window.sortSummary = function(colIdx) {
+    if (summarySort.col === colIdx) {
+      summarySort.asc = !summarySort.asc;
+    } else {
+      summarySort.col = colIdx;
+      summarySort.asc = false;
+    }
+    buildSummaryTable({ perStore: summaryData });
+  };
     const btn = document.getElementById('refreshBtn');
     const statusBar = document.getElementById('statusBar');
     btn.classList.add('loading');
@@ -1019,6 +1154,7 @@ const html = `<!DOCTYPE html>
       if (!data.ok) throw new Error(data.error || 'Unknown error');
 
       buildTable(data);
+      buildSummaryTable(data);
 
       statusBar.className = 'status-bar';
       const f = data.filters || {};
@@ -1027,8 +1163,8 @@ const html = `<!DOCTYPE html>
         f.area    ? 'Area: ' + f.area       : null,
         f.storeId ? 'Store: ' + f.storeId   : null
       ].filter(Boolean).join(' · ') || 'No filters';
-      const td = data._top200Debug || {};
-      statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · TOP200 [Sales rows:\${td.salesRowsCounted} TRX rows:\${td.trxRowsCounted} · headers at idx:\${(td.headerIndices||[]).join(',')} · totalSheetRows:\${td.totalSheetRows}] · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+      const storeCount = data.perStore ? data.perStore.length : 0;
+      statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · \${storeCount} stores in summary · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
       document.getElementById('footerText').textContent =
         \`CAMANAVA Region · Data Source: Google Sheets · \${data.rowCount} rows matched\`;
 
