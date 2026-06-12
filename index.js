@@ -509,6 +509,21 @@ const html = `<!DOCTYPE html>
 
   tbody tr:hover td { background: #FFF176; transition: background 0.15s; }
 
+  /* SECONDARY HIGHLIGHT - light green for subtotal rows (Balance TNAP, Total GEG, Net of Unusual) */
+  tbody tr.highlight-green td {
+    background: #E8F5E9;
+    font-weight: 700;
+    border-bottom: 1px solid #A5D6A7;
+    border-top: 1px solid #A5D6A7;
+  }
+  tbody tr.highlight-green td.metrics-col {
+    color: #1B5E20;
+    font-weight: 700;
+  }
+  tbody tr.highlight-green:hover td {
+    background: #FFF176;
+  }
+
   /* TOTAL SALES HIGHLIGHTED ROW */
   tbody tr.highlight-row td {
     background: linear-gradient(90deg, #FFF8E1 0%, #FFF9C4 100%);
@@ -894,7 +909,7 @@ const html = `<!DOCTYPE html>
         sob(d.top200.sales.yearAgo, tnapSalesYA))}
       \${metricsRow('Balance TNAP', balanceTnap,
         sob(balanceTnap.sales.current, totalTnapSalesCur),
-        sob(balanceTnap.sales.yearAgo, totalTnapSalesYA))}
+        sob(balanceTnap.sales.yearAgo, totalTnapSalesYA), 'highlight-green')}
       \${metricsRow('Gold', d.gold,
         sob(d.gold.sales.current, totalTnapSalesCur),
         sob(d.gold.sales.yearAgo, totalTnapSalesYA))}
@@ -904,7 +919,7 @@ const html = `<!DOCTYPE html>
       \${metricsRow('Green', d.green,
         sob(d.green.sales.current, totalTnapSalesCur),
         sob(d.green.sales.yearAgo, totalTnapSalesYA))}
-      \${metricsRow('Total GEG', totalGEG)}
+      \${metricsRow('Total GEG', totalGEG, null, null, 'highlight-green')}
       \${metricsRow('PERKS', d.perks,
         sob(d.perks.sales.current, totalSalesCur),
         sob(d.perks.sales.yearAgo, totalSalesYA))}
@@ -936,7 +951,7 @@ const html = `<!DOCTYPE html>
             sob(d.unusual.sales.current, totalSalesCur),
             sob(d.unusual.sales.yearAgo, totalSalesYA))}
           \${metricsRow('Total Uncarded', totalUncarded)}
-          \${salesOnlyRow('Net of Unusual', netOfUnusual)}
+          \${salesOnlyRow('Net of Unusual', netOfUnusual, null, null, 'highlight-green')}
         \`;
       })()}
     \`;
