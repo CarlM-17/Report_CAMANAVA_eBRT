@@ -474,7 +474,8 @@ const html = `<!DOCTYPE html>
   .table-wrapper { overflow-x: auto; }
 
   table {
-    width: 100%; border-collapse: collapse; font-size: 11.5px;
+    width: 100%; min-width: 1700px;
+    border-collapse: collapse; font-size: 11.5px;
     table-layout: fixed;
   }
 
