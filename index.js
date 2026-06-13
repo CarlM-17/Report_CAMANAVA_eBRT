@@ -255,6 +255,10 @@ app.get('/api/category-sales', async (req, res) => {
     const categorySet = new Set(categoryArr.map(c => c.toLowerCase()));
     const hasCatFilter = categorySet.size > 0;
 
+    // Breakdown filters - ONLY affect Sales by Area + Sales per Store tables
+    const bdCategory = (req.query.bdCategory || '').toString().trim();
+    const bdSubDept  = (req.query.bdSubDept  || '').toString().trim();
+
     const [catRows, storeRows] = await Promise.all([
       fetchSheet('CategorySales'),
       fetchSheet('ListOfStores')
@@ -271,13 +275,15 @@ app.get('/api/category-sales', async (req, res) => {
     const passCat = (c) => !hasCatFilter || categorySet.has((c || '').toString().trim().toLowerCase());
     const passArea = (ar) => !area || (ar || '').toString().trim().toLowerCase() === area.toLowerCase();
     const passStore = (sid) => !storeId || sid === storeId;
+    // For breakdown tables only
+    const passBdCat = (c) => !bdCategory || (c || '').toString().trim().toLowerCase() === bdCategory.toLowerCase();
+    const passBdSubDept = (s) => !bdSubDept || (s || '').toString().trim().toLowerCase() === bdSubDept.toLowerCase();
 
     // Indexes
-    const byCategory = {};
-    const bySubDeptStore = {};
-    const byArea = {};
-    const byStore = {};
-    const bySubDept = {};
+    const byCategory = {};   // category -> { sales, salesLY, subDepts: Set }
+    const bySubDept = {};    // subDept -> { category, sales, salesLY }
+    const byArea = {};       // area -> { sales, salesLY }
+    const byStore = {};      // storeId -> { storeName, area, sales, salesLY }
     const allCategorySet = new Set();
     const allSubDeptSet = new Set();
     let totalSales = 0, totalSalesLY = 0;
@@ -292,9 +298,11 @@ app.get('/api/category-sales', async (req, res) => {
       const salesLY = num(cols[7]);
       const category = (cols[8] || '').trim() || '(uncategorized)';
 
-      // Always collect category list (for filter dropdown population)
+      // Always collect category/subdept lists for dropdown population
       if (category) allCategorySet.add(category);
+      if (subDept)  allSubDeptSet.add(subDept);
 
+      // Apply MAIN filters
       if (!passMonth(m)) return;
       if (!passCat(category)) return;
       if (!passArea(ar)) return;
@@ -302,35 +310,33 @@ app.get('/api/category-sales', async (req, res) => {
 
       totalSales += sales;
       totalSalesLY += salesLY;
-      if (subDept) allSubDeptSet.add(subDept);
 
+      // Category aggregation (main filters only)
       if (!byCategory[category]) byCategory[category] = { sales: 0, salesLY: 0, subDepts: new Set() };
       byCategory[category].sales += sales;
       byCategory[category].salesLY += salesLY;
       if (subDept) byCategory[category].subDepts.add(subDept);
 
-      if (ar) {
-        if (!byArea[ar]) byArea[ar] = { sales: 0, salesLY: 0 };
-        byArea[ar].sales += sales;
-        byArea[ar].salesLY += salesLY;
-      }
-
-      if (sid) {
-        if (!byStore[sid]) byStore[sid] = { storeName: sname, area: ar, sales: 0, salesLY: 0 };
-        byStore[sid].sales += sales;
-        byStore[sid].salesLY += salesLY;
-      }
-
+      // Sub-dept aggregation (main filters only)
       if (subDept) {
-        if (!bySubDept[subDept]) bySubDept[subDept] = { sales: 0, salesLY: 0 };
+        if (!bySubDept[subDept]) bySubDept[subDept] = { category, sales: 0, salesLY: 0 };
         bySubDept[subDept].sales += sales;
         bySubDept[subDept].salesLY += salesLY;
       }
 
-      const key = sid + '|' + subDept;
-      if (!bySubDeptStore[key]) bySubDeptStore[key] = { category, storeName: sname, area: ar, subDept, sales: 0, salesLY: 0 };
-      bySubDeptStore[key].sales += sales;
-      bySubDeptStore[key].salesLY += salesLY;
+      // Area + Store aggregation — additionally apply breakdown filters
+      if (passBdCat(category) && passBdSubDept(subDept)) {
+        if (ar) {
+          if (!byArea[ar]) byArea[ar] = { sales: 0, salesLY: 0 };
+          byArea[ar].sales += sales;
+          byArea[ar].salesLY += salesLY;
+        }
+        if (sid) {
+          if (!byStore[sid]) byStore[sid] = { storeName: sname, area: ar, sales: 0, salesLY: 0 };
+          byStore[sid].sales += sales;
+          byStore[sid].salesLY += salesLY;
+        }
+      }
     });
 
     const computeDiff = (cur, ly) => {
@@ -355,7 +361,7 @@ app.get('/api/category-sales', async (req, res) => {
       }
     });
 
-    // Top & Bottom Sub-Departments by Growth (8 + 8)
+    // Sub-dept growth chart (8 top + 8 bottom by diff amount)
     const subDeptArray = Object.entries(bySubDept).map(([name, v]) => ({
       subDept: name, diffAmount: v.sales - v.salesLY
     }));
@@ -363,19 +369,20 @@ app.get('/api/category-sales', async (req, res) => {
     const topNeg = subDeptArray.filter(s => s.diffAmount < 0).sort((a,b) => a.diffAmount - b.diffAmount).slice(0, 8);
     const subDeptGrowth = [...topPos, ...topNeg];
 
-    // Sub-dept detail (top 100 by sales)
-    const subDeptDetail = Object.values(bySubDeptStore).map(v => {
+    // Sub-dept detail (top 100 by sales) - aggregated by subdept, no store
+    const subDeptDetail = Object.entries(bySubDept).map(([name, v]) => {
       const d = computeDiff(v.sales, v.salesLY);
-      return { ...v, diffPct: d.diffPct, diffAmount: d.diffAmount };
+      return { category: v.category, subDept: name, sales: v.sales, salesLY: v.salesLY,
+               diffPct: d.diffPct, diffAmount: d.diffAmount };
     }).sort((a, b) => b.sales - a.sales).slice(0, 100);
 
-    // Areas
+    // Areas (filtered by main + breakdown)
     const areas = Object.entries(byArea).map(([name, v]) => {
       const d = computeDiff(v.sales, v.salesLY);
       return { area: name, sales: v.sales, salesLY: v.salesLY, diffPct: d.diffPct, diffAmount: d.diffAmount };
     }).sort((a, b) => b.sales - a.sales);
 
-    // Stores
+    // Stores (filtered by main + breakdown)
     const stores = Object.entries(byStore).map(([sid, v]) => {
       const d = computeDiff(v.sales, v.salesLY);
       return { storeId: sid, storeName: v.storeName, area: v.area,
@@ -386,7 +393,8 @@ app.get('/api/category-sales', async (req, res) => {
 
     res.json({
       ok: true,
-      filters: { months: monthArr, categories: categoryArr, area: area || null, storeId: storeId || null },
+      filters: { months: monthArr, categories: categoryArr, area: area || null, storeId: storeId || null,
+                 bdCategory: bdCategory || null, bdSubDept: bdSubDept || null },
       summary: {
         totalSales, totalSalesLY,
         diffPct: summaryDiff.diffPct, diffAmount: summaryDiff.diffAmount,
@@ -394,7 +402,8 @@ app.get('/api/category-sales', async (req, res) => {
         growthCount, declineCount
       },
       categories, subDeptGrowth, subDeptDetail, areas, stores,
-      allCategories: [...allCategorySet].sort()
+      allCategories: [...allCategorySet].sort(),
+      allSubDepts:   [...allSubDeptSet].sort()
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1308,6 +1317,32 @@ const html = `<!DOCTYPE html>
     font-size: 10.5px; font-weight: 700; color: white;
     letter-spacing: 0.2px; white-space: nowrap;
   }
+
+  /* Breakdown section header (Area & Store) */
+  .bd-section { background: transparent; }
+  .bd-header {
+    display: flex; align-items: center; gap: 14px;
+    background: white; border: 1px solid #e8ebe8; border-radius: 10px;
+    padding: 12px 16px; flex-wrap: wrap;
+  }
+  .bd-section-title {
+    font-size: 13px; font-weight: 700; color: #1B5E20;
+    padding-left: 10px; border-left: 4px solid #FFC107;
+    letter-spacing: 0.3px;
+  }
+  .bd-filters {
+    margin-left: auto; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap;
+  }
+  .bd-filters label {
+    font-size: 10.5px; font-weight: 700; color: #1B5E20;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .bd-filters select {
+    border: 1px solid #d4dad4; border-radius: 6px; padding: 6px 10px;
+    font-size: 12px; color: #1a2e1f; background: white; min-width: 160px;
+  }
+  .bd-filters select:focus { outline: none; border-color: #1B5E20; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
@@ -1512,7 +1547,6 @@ const html = `<!DOCTYPE html>
       <table class="cs-table" id="csCategoryTable">
         <thead><tr>
           <th class="sortable" data-col="name">Category</th>
-          <th class="sortable" data-col="subDeptCount">Sub-Depts</th>
           <th class="sortable" data-col="sales">Sales</th>
           <th class="sortable" data-col="salesLY">Sales LY</th>
           <th class="sortable" data-col="diffPct">Diff %</th>
@@ -1540,7 +1574,6 @@ const html = `<!DOCTYPE html>
       <table class="cs-table" id="csDetailTable">
         <thead><tr>
           <th class="sortable" data-col="category">Category</th>
-          <th class="sortable" data-col="storeName">Store Name</th>
           <th class="sortable" data-col="subDept">Sub-Department</th>
           <th class="sortable" data-col="sales">Sales</th>
           <th class="sortable" data-col="salesLY">Sales LY</th>
@@ -1552,8 +1585,21 @@ const html = `<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Area & Store Breakdown section -->
+  <div class="bd-section" style="margin-top:14px;">
+    <div class="bd-header">
+      <div class="bd-section-title">Area &amp; Store Breakdown</div>
+      <div class="bd-filters">
+        <label>Category</label>
+        <select id="csBdCategory"><option value="">All Categories</option></select>
+        <label>Sub-Dept</label>
+        <select id="csBdSubDept"><option value="">All Sub-Depts</option></select>
+      </div>
+    </div>
+  </div>
+
   <!-- Sales by Area Table -->
-  <div class="table-card" style="margin-top:14px;">
+  <div class="table-card" style="margin-top:8px;">
     <div class="table-title-bar">Sales by Area</div>
     <div class="table-wrapper">
       <table class="cs-table" id="csAreaTable">
@@ -1570,7 +1616,7 @@ const html = `<!DOCTYPE html>
   </div>
 
   <!-- Sales per Store Table -->
-  <div class="table-card" style="margin-top:14px;">
+  <div class="table-card" style="margin-top:8px;">
     <div class="table-title-bar">Sales per Store</div>
     <div class="table-wrapper">
       <table class="cs-table" id="csStoreTable">
@@ -2525,6 +2571,8 @@ const html = `<!DOCTYPE html>
       f.stores.forEach(s => storeSel.innerHTML += \`<option value="\${s.id}">\${s.id} - \${s.name}</option>\`);
       areaSel.addEventListener('change', loadCategorySales);
       storeSel.addEventListener('change', loadCategorySales);
+      document.getElementById('csBdCategory').addEventListener('change', loadCategorySales);
+      document.getElementById('csBdSubDept').addEventListener('change', loadCategorySales);
       csFiltersLoaded = true;
     } catch (e) { console.error('cs filter load failed', e); }
   }
@@ -2542,11 +2590,15 @@ const html = `<!DOCTYPE html>
       const cats    = getMsValues('csMsCategory');
       const areaV   = document.getElementById('csAreaFilter').value;
       const storeV  = document.getElementById('csStoreFilter').value;
+      const bdCat   = document.getElementById('csBdCategory').value;
+      const bdSub   = document.getElementById('csBdSubDept').value;
       const params = new URLSearchParams();
       if (months.length) params.set('months', months.join(','));
       if (cats.length)   params.set('categories', cats.join(','));
       if (areaV)         params.set('area', areaV);
       if (storeV)        params.set('storeId', storeV);
+      if (bdCat)         params.set('bdCategory', bdCat);
+      if (bdSub)         params.set('bdSubDept', bdSub);
 
       const res = await fetch('/api/category-sales?' + params.toString());
       const data = await res.json();
@@ -2557,6 +2609,15 @@ const html = `<!DOCTYPE html>
       // Populate category multi-select on first load
       if (data.allCategories && !document.querySelector('#csMsCategoryPanel input')) {
         buildMsPanel('csMsCategory', data.allCategories, 'All Categories');
+      }
+      // Populate breakdown dropdowns on first load
+      if (data.allCategories && document.getElementById('csBdCategory').options.length <= 1) {
+        const bdc = document.getElementById('csBdCategory');
+        data.allCategories.forEach(c => bdc.innerHTML += \`<option value="\${c}">\${c}</option>\`);
+      }
+      if (data.allSubDepts && document.getElementById('csBdSubDept').options.length <= 1) {
+        const bds = document.getElementById('csBdSubDept');
+        data.allSubDepts.forEach(s => bds.innerHTML += \`<option value="\${s}">\${s}</option>\`);
       }
 
       renderCsKpis(data);
@@ -2625,7 +2686,6 @@ const html = `<!DOCTYPE html>
       const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
       return \`<tr>
         <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.name)}">\${r.name}</span></td>
-        <td>\${r.subDeptCount}</td>
         <td>\${csFmt(r.sales)}</td>
         <td>\${csFmt(r.salesLY)}</td>
         <td class="\${diffCls}">\${r.diffPct === null ? '—' : csFmtPct(r.diffPct)}</td>
@@ -2634,14 +2694,11 @@ const html = `<!DOCTYPE html>
       </tr>\`;
     }).join('');
 
-    // Footer totals
     const t = csCurrentData.summary;
-    const totSubDepts = csCurrentData.categories.reduce((s, c) => s + c.subDeptCount, 0);
     const totDiffCls = t.diffPct === null ? '' : (t.diffPct >= 0 ? 'pos' : 'neg');
     const totDiffAmtCls = t.diffAmount >= 0 ? 'pos' : 'neg';
     document.getElementById('csCategoryFoot').innerHTML = \`<tr>
       <td class="text-col">TOTAL · \${t.categoryCount} CATEGORIES</td>
-      <td>\${totSubDepts}</td>
       <td>\${csFmt(t.totalSales)}</td>
       <td>\${csFmt(t.totalSalesLY)}</td>
       <td class="\${totDiffCls}">\${t.diffPct === null ? '—' : csFmtPct(t.diffPct)}</td>
@@ -2663,7 +2720,6 @@ const html = `<!DOCTYPE html>
       const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
       return \`<tr>
         <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.category)}">\${r.category}</span></td>
-        <td class="text-col">\${r.storeName}<div style="font-size:10px;color:#94a094;font-weight:500;">\${r.area || ''}</div></td>
         <td class="text-col">\${r.subDept}</td>
         <td>\${csFmt(r.sales)}</td>
         <td>\${csFmt(r.salesLY)}</td>
