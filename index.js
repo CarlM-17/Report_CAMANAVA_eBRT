@@ -474,43 +474,43 @@ const html = `<!DOCTYPE html>
   .table-wrapper { overflow-x: auto; }
 
   table {
-    width: 100%; min-width: 1700px;
-    border-collapse: collapse; font-size: 11.5px;
+    width: 100%; min-width: 1340px;
+    border-collapse: collapse; font-size: 10.5px;
     table-layout: fixed;
   }
 
   /* SECTION HEADER */
   .section-header td {
     background: #1B5E20; color: white;
-    font-weight: 700; font-size: 11px;
-    letter-spacing: 0.8px; text-align: center;
-    padding: 9px 4px; text-transform: uppercase;
+    font-weight: 700; font-size: 10px;
+    letter-spacing: 0.6px; text-align: center;
+    padding: 8px 3px; text-transform: uppercase;
     position: relative;
   }
 
   /* COLUMN HEADER */
   .col-header td {
-    background: #FAF8F0; color: #4a5550; font-weight: 700; font-size: 10px;
-    text-align: center; padding: 6px 4px;
+    background: #FAF8F0; color: #4a5550; font-weight: 700; font-size: 9.5px;
+    text-align: center; padding: 5px 3px;
     border-bottom: 2px solid #FFC107;
-    text-transform: uppercase; letter-spacing: 0.4px;
+    text-transform: uppercase; letter-spacing: 0.3px;
   }
   .col-header td.metrics-col {
-    text-align: left; color: #1B5E20; padding-left: 12px;
+    text-align: left; color: #1B5E20; padding-left: 10px;
   }
 
   /* DATA ROWS */
   tbody tr td {
-    padding: 7px 5px; border-bottom: 1px solid #f0f2ef;
+    padding: 5px 4px; border-bottom: 1px solid #f0f2ef;
     vertical-align: middle;
   }
   tbody tr td.metrics-col {
     font-weight: 600; color: #1a2e1f; text-align: left;
-    white-space: nowrap; padding-left: 12px; font-size: 11.5px;
+    white-space: nowrap; padding-left: 10px; font-size: 10.5px;
   }
   tbody tr td.data-col {
     text-align: right; color: #3d4a40;
-    font-variant-numeric: tabular-nums; padding-right: 10px;
+    font-variant-numeric: tabular-nums; padding-right: 7px;
     font-weight: 500;
   }
   tbody tr td.diff-pos { color: #2E7D32; font-weight: 700; }
@@ -601,14 +601,14 @@ const html = `<!DOCTYPE html>
   .summary-header .summary-sub {
     font-size: 11px; color: #6b7570; font-weight: 500;
   }
-  .summary-table { font-size: 11px; min-width: 1500px; table-layout: fixed; }
+  .summary-table { font-size: 10px; min-width: 1240px; table-layout: fixed; }
   .summary-table thead th.store-col,
-  .summary-table tbody td.store-col { width: 180px; min-width: 180px; }
+  .summary-table tbody td.store-col { width: 150px; min-width: 150px; }
   .summary-table thead th {
     background: #1B5E20; color: white;
-    font-weight: 700; font-size: 10px;
-    text-align: center; padding: 9px 6px;
-    letter-spacing: 0.4px; text-transform: uppercase;
+    font-weight: 700; font-size: 9px;
+    text-align: center; padding: 7px 4px;
+    letter-spacing: 0.3px; text-transform: uppercase;
     cursor: pointer; user-select: none;
     position: sticky; top: 0; z-index: 1;
     transition: background 0.15s;
@@ -623,7 +623,7 @@ const html = `<!DOCTYPE html>
   .summary-table thead th.store-col { text-align: left; padding-left: 12px; }
 
   .summary-table tbody td {
-    padding: 7px 6px; border-bottom: 1px solid #f0f2ef;
+    padding: 5px 4px; border-bottom: 1px solid #f0f2ef;
     text-align: right; font-variant-numeric: tabular-nums;
     font-weight: 600;
   }
@@ -846,6 +846,8 @@ const html = `<!DOCTYPE html>
   function fmt(n, isCount = false) {
     if (n === null || n === undefined || isNaN(n)) return '—';
     if (isCount) return Math.round(n).toLocaleString('en-PH');
+    // For very large numbers (>= 1M), drop decimals to save column width
+    if (Math.abs(n) >= 1000000) return Math.round(n).toLocaleString('en-PH');
     return n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
