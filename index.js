@@ -85,7 +85,11 @@ app.get('/api/filters', async (req, res) => {
 // Per Store Sales Performance endpoint
 app.get('/api/store-performance', async (req, res) => {
   try {
-    const { area, month } = req.query;
+    const { area } = req.query;
+    // Multi-month support: accept comma-separated `months`, or fallback to `month` (single)
+    const monthsRaw = (req.query.months || req.query.month || '').toString();
+    const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const monthSet = new Set(monthArr.map(m => m.toLowerCase()));
 
     const [salesRows, targetRows, storeRows] = await Promise.all([
       fetchSheet(SHEET_NAME),
@@ -105,44 +109,48 @@ app.get('/api/store-performance', async (req, res) => {
       if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; storeRemarksMap[sid] = rm; }
     });
 
-    const passMonth = (m) => !month || (m || '').toString().trim().toLowerCase() === month.toLowerCase();
+    const passMonth = (m) => monthSet.size === 0 || monthSet.has((m || '').toString().trim().toLowerCase());
 
-    // Index SalesData by store (also build monthly trend - all months for chart)
-    const salesByStore = {};  // sid -> {sC, sY}
-    const monthlyTrend = {};  // monthName -> {sC, sY}
+    // Index SalesData by store, tracking active months (months with current sales > 0)
+    // Also build monthly trend (all months, ignore filter)
+    const salesByStore = {};   // sid -> { sC, sY, activeMonths: Set }
+    const monthlyTrend = {};   // monthName -> { sC, sY }
     salesRows.slice(1).forEach(cols => {
       if (!cols[5] && !cols[6]) return;
       const sid = (cols[3] || '').trim();
-      const m = cols[0];
+      const m = (cols[0] || '').toString().trim();
       const ar = storeAreaMap[sid] || '';
       if (area && ar.toLowerCase() !== area.toLowerCase()) return;
 
       if (passMonth(m)) {
-        if (!salesByStore[sid]) salesByStore[sid] = { sC: 0, sY: 0 };
-        salesByStore[sid].sC += num(cols[5]);
+        if (!salesByStore[sid]) salesByStore[sid] = { sC: 0, sY: 0, activeMonths: new Set() };
+        const curSales = num(cols[5]);
+        salesByStore[sid].sC += curSales;
         salesByStore[sid].sY += num(cols[6]);
+        if (curSales > 0 && m) salesByStore[sid].activeMonths.add(m.toLowerCase());
       }
       if (m) {
-        const mk = (m || '').toString().trim();
-        if (!monthlyTrend[mk]) monthlyTrend[mk] = { sC: 0, sY: 0 };
-        monthlyTrend[mk].sC += num(cols[5]);
-        monthlyTrend[mk].sY += num(cols[6]);
+        if (!monthlyTrend[m]) monthlyTrend[m] = { sC: 0, sY: 0 };
+        monthlyTrend[m].sC += num(cols[5]);
+        monthlyTrend[m].sY += num(cols[6]);
       }
     });
 
-    // Index SalesTarget by store
-    const targetByStore = {};
+    // Index SalesTarget per-store-per-month (so we can sum only months with current sales)
+    const targetByStoreMonth = {};  // sid -> { monthLower -> targetAmount }
     targetRows.slice(1).forEach(cols => {
       const sid = (cols[3] || '').trim();
-      const m = cols[0];
+      const m = (cols[0] || '').toString().trim();
+      if (!sid || !m) return;
       const ar = storeAreaMap[sid] || '';
       if (area && ar.toLowerCase() !== area.toLowerCase()) return;
       if (!passMonth(m)) return;
-      if (!targetByStore[sid]) targetByStore[sid] = 0;
-      targetByStore[sid] += num(cols[5]);
+      if (!targetByStoreMonth[sid]) targetByStoreMonth[sid] = {};
+      const key = m.toLowerCase();
+      targetByStoreMonth[sid][key] = (targetByStoreMonth[sid][key] || 0) + num(cols[5]);
     });
 
-    // Build rows
+    // Build rows - target only counts months where current sales exist for that store
     const stores = storeRows.slice(1)
       .filter(r => r[3] && r[3].trim() !== '')
       .filter(r => !area || (r[2] || '').toLowerCase() === area.toLowerCase());
@@ -152,8 +160,10 @@ app.get('/api/store-performance', async (req, res) => {
       const name = (r[4] || '').trim();
       const ar   = (r[2] || '').trim();
       const remarks = (r[5] || '').trim();
-      const s    = salesByStore[sid] || { sC: 0, sY: 0 };
-      const target = targetByStore[sid] || 0;
+      const s    = salesByStore[sid] || { sC: 0, sY: 0, activeMonths: new Set() };
+      const tgtMap = targetByStoreMonth[sid] || {};
+      let target = 0;
+      s.activeMonths.forEach(m => { target += (tgtMap[m] || 0); });
       const sales = s.sC;
       const salesYA = s.sY;
       const index   = salesYA !== 0 ? (sales / salesYA) * 100 : 0;
@@ -164,7 +174,8 @@ app.get('/api/store-performance', async (req, res) => {
       return {
         storeId: sid, storeName: name, area: ar, remarks,
         sales, salesYA, index, growth, valueVsYA,
-        target, pctVsTarget, valueVsTarget
+        target, pctVsTarget, valueVsTarget,
+        activeMonthCount: s.activeMonths.size
       };
     });
 
@@ -218,7 +229,7 @@ app.get('/api/store-performance', async (req, res) => {
 
     res.json({
       ok: true,
-      filters: { area: area || null, month: month || null },
+      filters: { area: area || null, months: monthArr },
       rows,
       total,
       summary,
@@ -233,7 +244,12 @@ app.get('/api/store-performance', async (req, res) => {
 app.get('/api/data', async (req, res) => {
   const t0 = Date.now();
   try {
-    const { area, storeId, month } = req.query;
+    const { area, storeId } = req.query;
+    // Multi-month: accept `months` (comma-separated) or single `month`
+    const monthsRaw = (req.query.months || req.query.month || '').toString();
+    const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const monthSet = new Set(monthArr.map(m => m.toLowerCase()));
+    const hasMonthFilter = monthSet.size > 0;
 
     // Fetch sheets in 2 batches of 4 to avoid Google Sheets rate limiting
     const [salesRows, shopperRows, storeRows, aparRows] = await Promise.all([
@@ -265,7 +281,7 @@ app.get('/api/data', async (req, res) => {
     const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
     // Helpers
-    const passMonth = (m) => !month || (m || '').toString().trim().toLowerCase() === month.toLowerCase();
+    const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
     const passArea  = (sid) => !area || (storeAreaMap[sid] || '').toLowerCase() === area.toLowerCase();
     const emptyMetric = () => ({ sC: 0, sY: 0, tC: 0, tY: 0 });
     const addInto = (target, src) => {
@@ -365,17 +381,21 @@ app.get('/api/data', async (req, res) => {
     function indexTop200(start, end, isTrx) {
       const idx = {};
       if (start < 0) return idx;
-      const monthIdx = month ? MONTHS.findIndex(m => m.toLowerCase() === month.toLowerCase()) : -1;
+      // Pre-compute selected month column indices (if filter)
+      const selectedMonthIdxs = hasMonthFilter
+        ? MONTHS.map((m, i) => monthSet.has(m.toLowerCase()) ? i : -1).filter(i => i >= 0)
+        : null;
       for (let i = start; i <= end && i < top200Rows.length; i++) {
         const r = top200Rows[i];
         if (!r || !r[2]) continue;
         const sid = (r[2] || '').trim();
         if (isNaN(parseFloat(sid))) continue;
         let cur = 0, ya = 0;
-        if (month) {
-          if (monthIdx < 0) continue;
-          cur = num(r[CUR_COL_START + monthIdx]);
-          ya  = num(r[YA_COL_START + monthIdx]);
+        if (selectedMonthIdxs) {
+          selectedMonthIdxs.forEach(mi => {
+            cur += num(r[CUR_COL_START + mi]);
+            ya  += num(r[YA_COL_START + mi]);
+          });
         } else {
           for (let m = 0; m < 12; m++) {
             if (num(r[CUR_COL_START + m]) > 0) {
@@ -480,7 +500,7 @@ app.get('/api/data', async (req, res) => {
     res.json({
       ok: true,
       rowCount: salesValidRows,
-      filters: { area: area || null, storeId: storeId || null, month: month || null },
+      filters: { area: area || null, storeId: storeId || null, months: monthArr },
       totalSales: agg.totalSales,
       tnap: agg.tnap,
       kain: agg.kain,
@@ -604,6 +624,42 @@ const html = `<!DOCTYPE html>
   }
   .btn-refresh:hover { background: #2E7D32; transform: translateY(-1px); }
   .btn-refresh.loading { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+  /* Multi-select widget */
+  .multi-select { position: relative; display: inline-block; }
+  .ms-btn {
+    border: 1px solid #d4dad4; border-radius: 6px; padding: 6px 28px 6px 10px;
+    font-size: 12px; color: #1a2e1f; background: white;
+    cursor: pointer; font-weight: 500; min-width: 130px;
+    text-align: left; position: relative;
+  }
+  .ms-btn:hover { border-color: #2E7D32; }
+  .ms-panel {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 100;
+    background: white; border: 1px solid #d4dad4; border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.12); padding: 6px;
+    min-width: 170px; max-height: 320px; overflow-y: auto;
+  }
+  .multi-select.open .ms-panel { display: block; }
+  .ms-panel label {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; cursor: pointer; font-size: 12px;
+    border-radius: 4px; color: #1a2e1f;
+  }
+  .ms-panel label:hover { background: #F1F8E9; }
+  .ms-panel input[type=checkbox] {
+    accent-color: #1B5E20; cursor: pointer; margin: 0;
+  }
+  .ms-panel .ms-actions {
+    display: flex; gap: 6px; padding: 4px 6px 8px;
+    border-bottom: 1px solid #eee; margin-bottom: 4px;
+  }
+  .ms-panel .ms-actions button {
+    flex: 1; background: #E8F5E9; border: 1px solid #C8E6C9;
+    border-radius: 4px; padding: 4px 6px; font-size: 10.5px;
+    color: #1B5E20; cursor: pointer; font-weight: 600;
+  }
+  .ms-panel .ms-actions button:hover { background: #C8E6C9; }
 
   /* STATUS BAR */
   .status-bar {
@@ -1009,7 +1065,7 @@ const html = `<!DOCTYPE html>
 </div>
 
 <div class="tabs">
-  <button class="tab-btn active" onclick="switchTab(this, 'daily')">Daily Sales</button>
+  <button class="tab-btn active" onclick="switchTab(this, 'daily')">One Page BRT</button>
   <button class="tab-btn" onclick="switchTab(this, 'monthly')">Per Store Sales Performance</button>
   <button class="tab-btn" onclick="switchTab(this, 'category')">Category Sales</button>
 </div>
@@ -1019,7 +1075,10 @@ const html = `<!DOCTYPE html>
 
   <div class="filter-bar">
     <label>Month</label>
-    <select id="monthFilter"><option value="">All Months</option></select>
+    <div class="multi-select" id="msMonth">
+      <button type="button" class="ms-btn" onclick="toggleMs('msMonth')">All Months ▾</button>
+      <div class="ms-panel" id="msMonthPanel"></div>
+    </div>
     <label>Area</label>
     <select id="areaFilter"><option value="">All Areas</option></select>
     <label>Store</label>
@@ -1085,7 +1144,10 @@ const html = `<!DOCTYPE html>
 
   <div class="filter-bar">
     <label>Month</label>
-    <select id="psMonthFilter"><option value="">All Months</option></select>
+    <div class="multi-select" id="psMsMonth">
+      <button type="button" class="ms-btn" onclick="toggleMs('psMsMonth')">All Months ▾</button>
+      <div class="ms-panel" id="psMsMonthPanel"></div>
+    </div>
     <label>Area</label>
     <select id="psAreaFilter"><option value="">All Areas</option></select>
     <button class="btn-refresh" id="psRefreshBtn" onclick="loadStorePerf()">↻ Refresh</button>
@@ -1520,11 +1582,11 @@ const html = `<!DOCTYPE html>
 
     try {
       // Build query string from filters
-      const month   = document.getElementById('monthFilter').value;
+      const months  = getMsValues('msMonth');
       const area    = document.getElementById('areaFilter').value;
       const storeId = document.getElementById('storeFilter').value;
       const params  = new URLSearchParams();
-      if (month)   params.set('month', month);
+      if (months.length) params.set('months', months.join(','));
       if (area)    params.set('area', area);
       if (storeId) params.set('storeId', storeId);
 
@@ -1538,8 +1600,12 @@ const html = `<!DOCTYPE html>
 
       statusBar.className = 'status-bar';
       const f = data.filters || {};
+      const mList = f.months || [];
+      const monthTxt = mList.length === 0 ? null
+                     : mList.length <= 3 ? 'Months: ' + mList.join(', ')
+                     : 'Months: ' + mList.length + ' selected';
       const filterTxt = [
-        f.month   ? 'Month: ' + f.month     : null,
+        monthTxt,
         f.area    ? 'Area: ' + f.area       : null,
         f.storeId ? 'Store: ' + f.storeId   : null
       ].filter(Boolean).join(' · ') || 'No filters';
@@ -1558,14 +1624,70 @@ const html = `<!DOCTYPE html>
   }
 
   // Load filter dropdowns from /api/filters
+  // ===== MULTI-SELECT WIDGET HELPERS =====
+  function toggleMs(id) {
+    // Close all other open panels first
+    document.querySelectorAll('.multi-select.open').forEach(el => {
+      if (el.id !== id) el.classList.remove('open');
+    });
+    document.getElementById(id).classList.toggle('open');
+  }
+  function getMsValues(id) {
+    return Array.from(document.querySelectorAll('#' + id + ' .ms-panel input[type=checkbox]:checked')).map(c => c.value);
+  }
+  function updateMsLabel(id, allLabel) {
+    const vals = getMsValues(id);
+    const btn = document.querySelector('#' + id + ' .ms-btn');
+    if (!btn) return;
+    if (vals.length === 0) btn.textContent = allLabel + ' ▾';
+    else if (vals.length <= 2) btn.textContent = vals.map(v => v.substring(0,3)).join(', ') + ' ▾';
+    else btn.textContent = vals.length + ' selected ▾';
+  }
+  function buildMsPanel(id, items, allLabel) {
+    const panel = document.getElementById(id + 'Panel');
+    if (!panel) return;
+    const ms = document.getElementById(id);
+    // Pick the right loader based on widget id
+    const onChange = id === 'msMonth' ? loadData : (id === 'psMsMonth' ? loadStorePerf : null);
+    const actions = \`
+      <div class="ms-actions">
+        <button type="button" data-act="all">Select All</button>
+        <button type="button" data-act="clear">Clear</button>
+      </div>\`;
+    const boxes = items.map(it => \`
+      <label><input type="checkbox" value="\${it}"> \${it}</label>\`).join('');
+    panel.innerHTML = actions + boxes;
+    // Wire change events
+    panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        updateMsLabel(id, allLabel);
+        if (onChange) onChange();
+      });
+    });
+    panel.querySelectorAll('.ms-actions button').forEach(b => {
+      b.addEventListener('click', () => {
+        const checked = b.dataset.act === 'all';
+        panel.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = checked);
+        updateMsLabel(id, allLabel);
+        if (onChange) onChange();
+      });
+    });
+    updateMsLabel(id, allLabel);
+  }
+  // Close all panels when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.multi-select')) {
+      document.querySelectorAll('.multi-select.open').forEach(el => el.classList.remove('open'));
+    }
+  });
+
   async function loadFilters() {
     try {
       const res = await fetch('/api/filters');
       const f = await res.json();
       if (!f.ok) return;
 
-      const monthSel = document.getElementById('monthFilter');
-      f.months.forEach(m => monthSel.innerHTML += \`<option value="\${m}">\${m}</option>\`);
+      buildMsPanel('msMonth', f.months, 'All Months');
 
       const areaSel = document.getElementById('areaFilter');
       f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
@@ -1574,7 +1696,6 @@ const html = `<!DOCTYPE html>
       populateStoreDropdown();
 
       // Auto-apply filters on any change
-      monthSel.addEventListener('change', loadData);
       areaSel.addEventListener('change', () => { populateStoreDropdown(); loadData(); });
       document.getElementById('storeFilter').addEventListener('change', loadData);
     } catch (e) {
@@ -1608,11 +1729,9 @@ const html = `<!DOCTYPE html>
       const res = await fetch('/api/filters');
       const f = await res.json();
       if (!f.ok) return;
-      const monthSel = document.getElementById('psMonthFilter');
-      f.months.forEach(m => monthSel.innerHTML += \`<option value="\${m}">\${m}</option>\`);
+      buildMsPanel('psMsMonth', f.months, 'All Months');
       const areaSel  = document.getElementById('psAreaFilter');
       f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
-      monthSel.addEventListener('change', loadStorePerf);
       areaSel.addEventListener('change', loadStorePerf);
       psFiltersLoaded = true;
     } catch (e) { console.error('ps filter load failed', e); }
@@ -1642,10 +1761,10 @@ const html = `<!DOCTYPE html>
     status.innerHTML = '<span class="spinner"></span> Loading store performance...';
 
     try {
-      const month = document.getElementById('psMonthFilter').value;
+      const months = getMsValues('psMsMonth');
       const areaV = document.getElementById('psAreaFilter').value;
       const params = new URLSearchParams();
-      if (month) params.set('month', month);
+      if (months.length) params.set('months', months.join(','));
       if (areaV) params.set('area', areaV);
 
       const res = await fetch('/api/store-performance?' + params.toString());
@@ -1659,8 +1778,11 @@ const html = `<!DOCTYPE html>
       renderPsCharts(data);
 
       status.className = 'status-bar';
+      const monthTxt = months.length === 0 ? null
+                     : months.length <= 3 ? 'Months: ' + months.join(', ')
+                     : 'Months: ' + months.length + ' selected';
       const ftxt = [
-        month ? 'Month: ' + month : null,
+        monthTxt,
         areaV ? 'Area: ' + areaV : null
       ].filter(Boolean).join(' · ') || 'No filters';
       status.innerHTML = \`✅ \${ftxt} · \${data.rows.length} stores · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
