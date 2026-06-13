@@ -93,14 +93,16 @@ app.get('/api/store-performance', async (req, res) => {
       fetchSheet('ListOfStores')
     ]);
 
-    // Build store lookup (Store ID -> name + area from ListOfStores)
+    // Build store lookup (Store ID -> name + area + remarks from ListOfStores)
     const storeAreaMap = {};
     const storeNameMap = {};
+    const storeRemarksMap = {};
     storeRows.slice(1).forEach(r => {
       const sid = (r[3] || '').trim();
       const ar  = (r[2] || '').trim();
       const nm  = (r[4] || '').trim();
-      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
+      const rm  = (r[5] || '').trim();
+      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; storeRemarksMap[sid] = rm; }
     });
 
     const passMonth = (m) => !month || (m || '').toString().trim().toLowerCase() === month.toLowerCase();
@@ -149,6 +151,7 @@ app.get('/api/store-performance', async (req, res) => {
       const sid  = (r[3] || '').trim();
       const name = (r[4] || '').trim();
       const ar   = (r[2] || '').trim();
+      const remarks = (r[5] || '').trim();
       const s    = salesByStore[sid] || { sC: 0, sY: 0 };
       const target = targetByStore[sid] || 0;
       const sales = s.sC;
@@ -159,7 +162,7 @@ app.get('/api/store-performance', async (req, res) => {
       const pctVsTarget   = target !== 0 ? (sales / target) * 100 : 0;
       const valueVsTarget = sales - target;
       return {
-        storeId: sid, storeName: name, area: ar,
+        storeId: sid, storeName: name, area: ar, remarks,
         sales, salesYA, index, growth, valueVsYA,
         target, pctVsTarget, valueVsTarget
       };
@@ -177,6 +180,23 @@ app.get('/api/store-performance', async (req, res) => {
     total.valueVsYA = total.sales - total.salesYA;
     total.pctVsTarget = total.target !== 0 ? (total.sales / total.target) * 100 : 0;
     total.valueVsTarget = total.sales - total.target;
+
+    // Summary KPIs
+    const organicRows = rows.filter(r => r.remarks.toLowerCase() === 'organic');
+    const organicSalesCur = organicRows.reduce((s, r) => s + r.sales, 0);
+    const organicSalesYA  = organicRows.reduce((s, r) => s + r.salesYA, 0);
+    const organicGrowth = organicSalesYA !== 0 ? ((organicSalesCur - organicSalesYA) / Math.abs(organicSalesYA)) * 100 : 0;
+    const declinedCount = rows.filter(r => r.salesYA > 0 && r.growth < 0).length;
+
+    const summary = {
+      valueVsYA:     total.valueVsYA,
+      indexVsLY:     total.index,
+      valueVsTarget: total.valueVsTarget,
+      indexVsTarget: total.pctVsTarget,
+      declinedCount,
+      organicGrowth,
+      organicCount:  organicRows.length
+    };
 
     // Charts data
     const MONTHS_ORDER = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -201,6 +221,7 @@ app.get('/api/store-performance', async (req, res) => {
       filters: { area: area || null, month: month || null },
       rows,
       total,
+      summary,
       trendData,
       areaGrowth
     });
@@ -865,6 +886,51 @@ const html = `<!DOCTYPE html>
   .table-wrapper::-webkit-scrollbar-track { background: #f4f6f4; }
 
   /* ===== PER STORE SALES PERFORMANCE ===== */
+
+  /* KPI Cards */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .kpi-card {
+    background: white; border-radius: 10px;
+    border: 1px solid #e8ebe8;
+    padding: 12px 14px;
+    position: relative; overflow: hidden;
+  }
+  .kpi-card::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+    width: 4px; background: #1B5E20;
+  }
+  .kpi-card.kpi-pos::before { background: #2E7D32; }
+  .kpi-card.kpi-neg::before { background: #C62828; }
+  .kpi-card.kpi-warn::before { background: #FFC107; }
+  .kpi-label {
+    font-size: 10px; color: #6b7570;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    font-weight: 700; margin-bottom: 4px;
+  }
+  .kpi-value {
+    font-size: 17px; font-weight: 800;
+    color: #1a2e1f; letter-spacing: -0.3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi-card.kpi-pos .kpi-value { color: #2E7D32; }
+  .kpi-card.kpi-neg .kpi-value { color: #C62828; }
+  .kpi-sub {
+    font-size: 10px; color: #94a094;
+    margin-top: 2px; font-weight: 500;
+  }
+  @media (max-width: 1100px) {
+    .kpi-grid { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 600px) {
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .kpi-value { font-size: 15px; }
+  }
+
   .ps-table {
     width: 100%; min-width: 1100px;
     border-collapse: collapse; font-size: 11.5px;
@@ -876,7 +942,15 @@ const html = `<!DOCTYPE html>
     text-align: center; letter-spacing: 0.4px;
     text-transform: uppercase;
     border-bottom: 2px solid #FFC107;
+    cursor: pointer; user-select: none;
+    transition: background 0.15s;
   }
+  .ps-table thead th.sortable:hover { background: #1B5E20; }
+  .ps-table thead th.sortable::after {
+    content: ' ⇅'; opacity: 0.4; font-size: 9px;
+  }
+  .ps-table thead th.sort-asc::after  { content: ' ↑'; opacity: 1; color: #FFC107; }
+  .ps-table thead th.sort-desc::after { content: ' ↓'; opacity: 1; color: #FFC107; }
   .ps-table thead th.store-col { text-align: left; padding-left: 14px; width: 200px; }
   .ps-table tbody td {
     padding: 7px 10px; border-bottom: 1px solid #f0f2ef;
@@ -925,6 +999,7 @@ const html = `<!DOCTYPE html>
   }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
 </head>
 <body>
 
@@ -1020,20 +1095,23 @@ const html = `<!DOCTYPE html>
     <span class="spinner"></span> Loading store performance...
   </div>
 
+  <!-- KPI Cards -->
+  <div class="kpi-grid" id="psKpiGrid"></div>
+
   <!-- Main Performance Table -->
   <div class="table-card">
     <div class="table-wrapper">
       <table id="psTable" class="ps-table">
         <thead>
           <tr>
-            <th class="store-col">Store Name</th>
-            <th>Sales</th>
-            <th>Sales YA</th>
-            <th>Index</th>
-            <th>Value vs YA</th>
-            <th>Target</th>
-            <th>% vs Target</th>
-            <th>Value vs Target</th>
+            <th class="store-col sortable" data-col="storeName">Store Name</th>
+            <th class="sortable" data-col="sales">Sales</th>
+            <th class="sortable" data-col="salesYA">Sales YA</th>
+            <th class="sortable" data-col="index">Index</th>
+            <th class="sortable" data-col="valueVsYA">Value vs YA</th>
+            <th class="sortable" data-col="target">Target</th>
+            <th class="sortable" data-col="pctVsTarget">% vs Target</th>
+            <th class="sortable" data-col="valueVsTarget">Value vs Target</th>
           </tr>
         </thead>
         <tbody id="psTableBody"></tbody>
@@ -1521,6 +1599,8 @@ const html = `<!DOCTYPE html>
   // ========= PER STORE SALES PERFORMANCE =========
   let psFiltersLoaded = false;
   let psCharts = { trend: null, area: null, target: null, growth: null };
+  let psCurrentData = null;
+  let psSort = { col: null, asc: true };
 
   async function loadPsFilters() {
     if (psFiltersLoaded) return;
@@ -1572,6 +1652,9 @@ const html = `<!DOCTYPE html>
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || 'Unknown error');
 
+      psCurrentData = data;
+      psSort = { col: null, asc: true };
+      renderPsKpis(data);
       renderPsTable(data);
       renderPsCharts(data);
 
@@ -1590,10 +1673,60 @@ const html = `<!DOCTYPE html>
     }
   }
 
+  function renderPsKpis(data) {
+    const s = data.summary || {};
+    const fmtMoney = n => {
+      if (n === null || n === undefined || isNaN(n)) return '—';
+      const abs = Math.abs(n);
+      const sign = n < 0 ? '-' : '';
+      if (abs >= 1e9) return sign + '₱' + (abs/1e9).toFixed(2) + 'B';
+      if (abs >= 1e6) return sign + '₱' + (abs/1e6).toFixed(2) + 'M';
+      if (abs >= 1e3) return sign + '₱' + (abs/1e3).toFixed(1) + 'K';
+      return sign + '₱' + abs.toFixed(0);
+    };
+    const fmtPct = n => (n === null || n === undefined || isNaN(n)) ? '—' : n.toFixed(2) + '%';
+
+    const cards = [
+      { label: 'Value vs YA',     value: fmtMoney(s.valueVsYA),     cls: s.valueVsYA >= 0 ? 'kpi-pos' : 'kpi-neg', sub: s.valueVsYA >= 0 ? 'Growth in pesos' : 'Decline in pesos' },
+      { label: 'Index vs LY',     value: fmtPct(s.indexVsLY),       cls: s.indexVsLY >= 100 ? 'kpi-pos' : 'kpi-neg', sub: s.indexVsLY >= 100 ? 'Above last year' : 'Below last year' },
+      { label: 'Value vs Target', value: fmtMoney(s.valueVsTarget), cls: s.valueVsTarget >= 0 ? 'kpi-pos' : 'kpi-neg', sub: s.valueVsTarget >= 0 ? 'Over target' : 'Below target' },
+      { label: 'Index vs Target', value: fmtPct(s.indexVsTarget),   cls: s.indexVsTarget >= 100 ? 'kpi-pos' : 'kpi-warn', sub: s.indexVsTarget >= 100 ? 'Target achieved' : 'Target not met' },
+      { label: 'Stores Declined', value: (s.declinedCount ?? 0) + ' / ' + (data.rows ? data.rows.length : 0), cls: (s.declinedCount > 0) ? 'kpi-neg' : 'kpi-pos', sub: 'vs Last Year' },
+      { label: 'Organic Growth',  value: fmtPct(s.organicGrowth),   cls: s.organicGrowth >= 0 ? 'kpi-pos' : 'kpi-neg', sub: (s.organicCount || 0) + ' organic stores' }
+    ];
+    document.getElementById('psKpiGrid').innerHTML = cards.map(c => \`
+      <div class="kpi-card \${c.cls}">
+        <div class="kpi-label">\${c.label}</div>
+        <div class="kpi-value">\${c.value}</div>
+        <div class="kpi-sub">\${c.sub}</div>
+      </div>\`).join('');
+  }
+
   function renderPsTable(data) {
+    let rows = data.rows.slice();
+    if (psSort.col) {
+      rows.sort((a, b) => {
+        let va = a[psSort.col], vb = b[psSort.col];
+        if (typeof va === 'string') {
+          return psSort.asc ? va.localeCompare(vb) : vb.localeCompare(va);
+        }
+        if (isNaN(va) || !isFinite(va)) va = -Infinity;
+        if (isNaN(vb) || !isFinite(vb)) vb = -Infinity;
+        return psSort.asc ? va - vb : vb - va;
+      });
+    }
+
+    // Update header sort indicators
+    document.querySelectorAll('#psTable thead th.sortable').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.col === psSort.col) {
+        th.classList.add(psSort.asc ? 'sort-asc' : 'sort-desc');
+      }
+    });
+
     const body = document.getElementById('psTableBody');
-    body.innerHTML = data.rows.map(r => {
-      const valYAClass = r.valueVsYA >= 0 ? 'pos' : 'neg';
+    body.innerHTML = rows.map(r => {
+      const valYAClass  = r.valueVsYA >= 0 ? 'pos' : 'neg';
       const valTgtClass = r.valueVsTarget >= 0 ? 'pos' : 'neg';
       const pctTgtClass = r.pctVsTarget >= 100 ? 'pos' : 'neg';
       const indexClass  = r.index >= 100 ? 'pos' : 'neg';
@@ -1627,24 +1760,56 @@ const html = `<!DOCTYPE html>
     </tr>\`;
   }
 
+  // Sort click handler
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('#psTable thead th.sortable');
+    if (!th || !psCurrentData) return;
+    const col = th.dataset.col;
+    if (psSort.col === col) psSort.asc = !psSort.asc;
+    else { psSort.col = col; psSort.asc = false; }
+    renderPsTable(psCurrentData);
+  });
+
   function renderPsCharts(data) {
     // Destroy old charts before recreating
     Object.values(psCharts).forEach(c => { if (c) c.destroy(); });
+
+    // Register datalabels plugin once
+    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
+      Chart.register(window.ChartDataLabels);
+      Chart._datalabelsRegistered = true;
+    }
 
     const GREEN = '#1B5E20';
     const GREEN_LIGHT = '#66BB6A';
     const YELLOW = '#FFC107';
     const RED = '#C62828';
+
+    // Dynamic height for tall horizontal charts: 22px per store + padding
+    const tallHeight = Math.max(340, data.rows.length * 22 + 60);
+    document.querySelectorAll('.chart-wrap-tall').forEach(el => el.style.height = tallHeight + 'px');
+
+    const compactNum = v => {
+      const abs = Math.abs(v);
+      if (abs >= 1e9) return (v/1e9).toFixed(1) + 'B';
+      if (abs >= 1e6) return (v/1e6).toFixed(1) + 'M';
+      if (abs >= 1e3) return (v/1e3).toFixed(0) + 'K';
+      return Math.round(v).toString();
+    };
+
     const commonOpts = {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { font: { size: 11 }, color: '#444' } } },
+      plugins: {
+        legend: { labels: { font: { size: 11 }, color: '#444' } },
+        datalabels: { display: true }
+      },
       scales: {
         x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } },
         y: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } }
       }
     };
 
-    // 1) Monthly Sales Trend (line, Current vs YA)
+    // 1) Monthly Sales Trend (line)
     psCharts.trend = new Chart(document.getElementById('chartTrend'), {
       type: 'line',
       data: {
@@ -1660,10 +1825,18 @@ const html = `<!DOCTYPE html>
       },
       options: {
         ...commonOpts,
+        plugins: {
+          ...commonOpts.plugins,
+          datalabels: {
+            align: 'top', anchor: 'end', offset: 4,
+            color: ctx => ctx.dataset.borderColor,
+            font: { size: 9, weight: 700 },
+            formatter: v => compactNum(v)
+          }
+        },
         scales: {
           ...commonOpts.scales,
-          y: { ...commonOpts.scales.y, ticks: { ...commonOpts.scales.y.ticks,
-            callback: v => (v >= 1e9 ? (v/1e9).toFixed(1)+'B' : v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : v) } }
+          y: { ...commonOpts.scales.y, ticks: { ...commonOpts.scales.y.ticks, callback: v => compactNum(v) } }
         }
       }
     });
@@ -1683,12 +1856,23 @@ const html = `<!DOCTYPE html>
       },
       options: {
         ...commonOpts,
-        plugins: { legend: { display: false } },
-        scales: { ...commonOpts.scales, y: { ...commonOpts.scales.y, ticks: { ...commonOpts.scales.y.ticks, callback: v => v + '%' } } }
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 11, weight: 700 },
+            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        },
+        scales: {
+          ...commonOpts.scales,
+          y: { ...commonOpts.scales.y, ticks: { ...commonOpts.scales.y.ticks, callback: v => v + '%' } }
+        }
       }
     });
 
-    // 3) Target Achievement per Store (horizontal bar - easier to read store names)
+    // 3) Target Achievement per Store (horizontal bar - all stores visible)
     const sortedByTgt = [...data.rows].sort((a,b) => b.pctVsTarget - a.pctVsTarget);
     psCharts.target = new Chart(document.getElementById('chartTarget'), {
       type: 'bar',
@@ -1705,15 +1889,23 @@ const html = `<!DOCTYPE html>
       options: {
         ...commonOpts,
         indexAxis: 'y',
-        plugins: { legend: { display: false } },
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 4,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 100 ? GREEN : '#E65100',
+            font: { size: 10, weight: 700 },
+            formatter: v => v.toFixed(1) + '%'
+          }
+        },
         scales: {
           x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
-          y: { ticks: { color: '#555', font: { size: 9 } }, grid: { display: false } }
+          y: { ticks: { color: '#333', font: { size: 10, weight: 500 }, autoSkip: false }, grid: { display: false } }
         }
       }
     });
 
-    // 4) Growth vs LY % per Store (horizontal bar)
+    // 4) Growth vs LY % per Store (horizontal bar - all stores visible)
     const sortedByGrowth = [...data.rows].sort((a,b) => b.growth - a.growth);
     psCharts.growth = new Chart(document.getElementById('chartGrowth'), {
       type: 'bar',
@@ -1730,10 +1922,18 @@ const html = `<!DOCTYPE html>
       options: {
         ...commonOpts,
         indexAxis: 'y',
-        plugins: { legend: { display: false } },
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 4,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 10, weight: 700 },
+            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        },
         scales: {
           x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
-          y: { ticks: { color: '#555', font: { size: 9 } }, grid: { display: false } }
+          y: { ticks: { color: '#333', font: { size: 10, weight: 500 }, autoSkip: false }, grid: { display: false } }
         }
       }
     });
