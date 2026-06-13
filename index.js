@@ -241,6 +241,166 @@ app.get('/api/store-performance', async (req, res) => {
   }
 });
 
+// Category Sales endpoint - reads CategorySales sheet
+app.get('/api/category-sales', async (req, res) => {
+  try {
+    const { area, storeId } = req.query;
+    const monthsRaw = (req.query.months || req.query.month || '').toString();
+    const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const monthSet = new Set(monthArr.map(m => m.toLowerCase()));
+    const hasMonthFilter = monthSet.size > 0;
+
+    const categoriesRaw = (req.query.categories || req.query.category || '').toString();
+    const categoryArr = categoriesRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const categorySet = new Set(categoryArr.map(c => c.toLowerCase()));
+    const hasCatFilter = categorySet.size > 0;
+
+    const [catRows, storeRows] = await Promise.all([
+      fetchSheet('CategorySales'),
+      fetchSheet('ListOfStores')
+    ]);
+
+    // Build store lookup
+    const storeNameMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      if (sid) storeNameMap[sid] = (r[4] || '').trim();
+    });
+
+    const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
+    const passCat = (c) => !hasCatFilter || categorySet.has((c || '').toString().trim().toLowerCase());
+    const passArea = (ar) => !area || (ar || '').toString().trim().toLowerCase() === area.toLowerCase();
+    const passStore = (sid) => !storeId || sid === storeId;
+
+    // Indexes
+    const byCategory = {};
+    const bySubDeptStore = {};
+    const byArea = {};
+    const byStore = {};
+    const bySubDept = {};
+    const allCategorySet = new Set();
+    const allSubDeptSet = new Set();
+    let totalSales = 0, totalSalesLY = 0;
+
+    catRows.slice(1).forEach(cols => {
+      const m = cols[0];
+      const ar = (cols[1] || '').trim();
+      const sid = (cols[2] || '').trim();
+      const sname = (cols[3] || '').trim() || storeNameMap[sid] || sid;
+      const subDept = (cols[5] || '').trim();
+      const sales = num(cols[6]);
+      const salesLY = num(cols[7]);
+      const category = (cols[8] || '').trim() || '(uncategorized)';
+
+      // Always collect category list (for filter dropdown population)
+      if (category) allCategorySet.add(category);
+
+      if (!passMonth(m)) return;
+      if (!passCat(category)) return;
+      if (!passArea(ar)) return;
+      if (!passStore(sid)) return;
+
+      totalSales += sales;
+      totalSalesLY += salesLY;
+      if (subDept) allSubDeptSet.add(subDept);
+
+      if (!byCategory[category]) byCategory[category] = { sales: 0, salesLY: 0, subDepts: new Set() };
+      byCategory[category].sales += sales;
+      byCategory[category].salesLY += salesLY;
+      if (subDept) byCategory[category].subDepts.add(subDept);
+
+      if (ar) {
+        if (!byArea[ar]) byArea[ar] = { sales: 0, salesLY: 0 };
+        byArea[ar].sales += sales;
+        byArea[ar].salesLY += salesLY;
+      }
+
+      if (sid) {
+        if (!byStore[sid]) byStore[sid] = { storeName: sname, area: ar, sales: 0, salesLY: 0 };
+        byStore[sid].sales += sales;
+        byStore[sid].salesLY += salesLY;
+      }
+
+      if (subDept) {
+        if (!bySubDept[subDept]) bySubDept[subDept] = { sales: 0, salesLY: 0 };
+        bySubDept[subDept].sales += sales;
+        bySubDept[subDept].salesLY += salesLY;
+      }
+
+      const key = sid + '|' + subDept;
+      if (!bySubDeptStore[key]) bySubDeptStore[key] = { category, storeName: sname, area: ar, subDept, sales: 0, salesLY: 0 };
+      bySubDeptStore[key].sales += sales;
+      bySubDeptStore[key].salesLY += salesLY;
+    });
+
+    const computeDiff = (cur, ly) => {
+      const diffAmount = cur - ly;
+      const diffPct = ly !== 0 ? (diffAmount / Math.abs(ly)) * 100 : null;
+      return { diffAmount, diffPct };
+    };
+
+    // Categories table data
+    const categories = Object.entries(byCategory).map(([name, v]) => {
+      const d = computeDiff(v.sales, v.salesLY);
+      const sharePct = totalSales !== 0 ? (v.sales / totalSales) * 100 : 0;
+      return { name, subDeptCount: v.subDepts.size, sales: v.sales, salesLY: v.salesLY,
+               diffPct: d.diffPct, diffAmount: d.diffAmount, sharePct };
+    }).sort((a, b) => b.sales - a.sales);
+
+    let growthCount = 0, declineCount = 0;
+    categories.forEach(c => {
+      if (c.diffPct !== null) {
+        if (c.diffPct > 0) growthCount++;
+        else if (c.diffPct < 0) declineCount++;
+      }
+    });
+
+    // Top & Bottom Sub-Departments by Growth (8 + 8)
+    const subDeptArray = Object.entries(bySubDept).map(([name, v]) => ({
+      subDept: name, diffAmount: v.sales - v.salesLY
+    }));
+    const topPos = subDeptArray.filter(s => s.diffAmount > 0).sort((a,b) => b.diffAmount - a.diffAmount).slice(0, 8);
+    const topNeg = subDeptArray.filter(s => s.diffAmount < 0).sort((a,b) => a.diffAmount - b.diffAmount).slice(0, 8);
+    const subDeptGrowth = [...topPos, ...topNeg];
+
+    // Sub-dept detail (top 100 by sales)
+    const subDeptDetail = Object.values(bySubDeptStore).map(v => {
+      const d = computeDiff(v.sales, v.salesLY);
+      return { ...v, diffPct: d.diffPct, diffAmount: d.diffAmount };
+    }).sort((a, b) => b.sales - a.sales).slice(0, 100);
+
+    // Areas
+    const areas = Object.entries(byArea).map(([name, v]) => {
+      const d = computeDiff(v.sales, v.salesLY);
+      return { area: name, sales: v.sales, salesLY: v.salesLY, diffPct: d.diffPct, diffAmount: d.diffAmount };
+    }).sort((a, b) => b.sales - a.sales);
+
+    // Stores
+    const stores = Object.entries(byStore).map(([sid, v]) => {
+      const d = computeDiff(v.sales, v.salesLY);
+      return { storeId: sid, storeName: v.storeName, area: v.area,
+               sales: v.sales, salesLY: v.salesLY, diffPct: d.diffPct, diffAmount: d.diffAmount };
+    }).sort((a, b) => b.sales - a.sales);
+
+    const summaryDiff = computeDiff(totalSales, totalSalesLY);
+
+    res.json({
+      ok: true,
+      filters: { months: monthArr, categories: categoryArr, area: area || null, storeId: storeId || null },
+      summary: {
+        totalSales, totalSalesLY,
+        diffPct: summaryDiff.diffPct, diffAmount: summaryDiff.diffAmount,
+        categoryCount: categories.length, subDeptCount: allSubDeptSet.size,
+        growthCount, declineCount
+      },
+      categories, subDeptGrowth, subDeptDetail, areas, stores,
+      allCategories: [...allCategorySet].sort()
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/data', async (req, res) => {
   const t0 = Date.now();
   try {
@@ -1053,6 +1213,101 @@ const html = `<!DOCTYPE html>
     .chart-wrap { height: 220px; }
     .chart-wrap-tall { height: 280px; }
   }
+
+  /* ===== CATEGORY SALES TAB ===== */
+  .kpi-grid-5 { grid-template-columns: repeat(5, 1fr); }
+  @media (max-width: 1100px) { .kpi-grid-5 { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 600px)  { .kpi-grid-5 { grid-template-columns: repeat(2, 1fr); } }
+
+  .cs-charts-row {
+    display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px;
+    margin-top: 4px;
+  }
+  @media (max-width: 900px) { .cs-charts-row { grid-template-columns: 1fr; } }
+
+  .table-title-bar {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; font-weight: 700; color: #1B5E20;
+    padding: 12px 16px; border-bottom: 1px solid #f0f2ef;
+    background: #FAFBF9; border-radius: 8px 8px 0 0;
+  }
+  .table-title-bar::before {
+    content: ''; width: 4px; height: 16px; background: #FFC107;
+    border-radius: 2px; display: inline-block;
+  }
+  .table-meta {
+    font-size: 10.5px; font-weight: 500; color: #94a094;
+    text-transform: none; letter-spacing: 0;
+  }
+  .variance-filters {
+    margin-left: auto; display: flex; gap: 4px;
+  }
+  .variance-filters button {
+    background: white; border: 1px solid #d4dad4; border-radius: 6px;
+    padding: 4px 10px; font-size: 11px; cursor: pointer;
+    color: #4a5550; font-weight: 600;
+  }
+  .variance-filters button:hover { border-color: #2E7D32; color: #1B5E20; }
+  .variance-filters button.active {
+    background: #1B5E20; color: white; border-color: #1B5E20;
+  }
+
+  /* Category Sales tables (shared styling) */
+  .cs-table {
+    width: 100%; min-width: 900px;
+    border-collapse: collapse; font-size: 11.5px;
+  }
+  .cs-table thead th {
+    background: #2E7D32; color: white; font-weight: 700;
+    font-size: 10.5px; padding: 9px 10px;
+    text-align: right; letter-spacing: 0.4px;
+    text-transform: uppercase;
+    border-bottom: 2px solid #FFC107;
+    cursor: pointer; user-select: none;
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+  .cs-table thead th:first-child,
+  .cs-table thead th[data-col=name],
+  .cs-table thead th[data-col=storeName],
+  .cs-table thead th[data-col=subDept],
+  .cs-table thead th[data-col=category],
+  .cs-table thead th[data-col=area],
+  .cs-table thead th[data-col=storeId] {
+    text-align: left; padding-left: 14px;
+  }
+  .cs-table thead th.sortable:hover { background: #1B5E20; }
+  .cs-table thead th.sortable::after { content: ' ⇅'; opacity: 0.4; font-size: 9px; }
+  .cs-table thead th.sort-asc::after  { content: ' ↑'; opacity: 1; color: #FFC107; }
+  .cs-table thead th.sort-desc::after { content: ' ↓'; opacity: 1; color: #FFC107; }
+  .cs-table tbody td {
+    padding: 7px 10px; border-bottom: 1px solid #f0f2ef;
+    text-align: right; color: #3d4a40; font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .cs-table tbody td.text-col {
+    text-align: left; padding-left: 14px; color: #1a2e1f; font-weight: 600;
+  }
+  .cs-table tbody tr:hover td { background: #FFF8E1; }
+  .cs-table tbody tr:nth-child(even) td { background: #fafbf9; }
+  .cs-table tbody tr:nth-child(even):hover td { background: #FFF8E1; }
+  .cs-table tfoot td {
+    padding: 9px 10px; font-weight: 800;
+    background: linear-gradient(90deg, #FFF8E1 0%, #FFF9C4 100%);
+    border-top: 2px solid #FFC107; border-bottom: 2px solid #FFC107;
+    color: #1B5E20; text-align: right;
+    font-variant-numeric: tabular-nums; font-size: 12px;
+  }
+  .cs-table tfoot td.text-col { text-align: left; padding-left: 14px; }
+  .cs-table .pos { color: #2E7D32; font-weight: 700; }
+  .cs-table .neg { color: #C62828; font-weight: 700; }
+
+  /* Category & area badges */
+  .cat-badge, .area-badge {
+    display: inline-block; padding: 3px 9px; border-radius: 12px;
+    font-size: 10.5px; font-weight: 700; color: white;
+    letter-spacing: 0.2px; white-space: nowrap;
+  }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
@@ -1206,7 +1461,133 @@ const html = `<!DOCTYPE html>
 
 <!-- CATEGORY TAB -->
 <div id="tab-category" class="content" style="display:none;">
-  <div style="text-align:center; padding: 60px; color: #aaa; font-size:14px;">Category Sales tab — coming soon</div>
+
+  <div class="filter-bar">
+    <label>Month</label>
+    <div class="multi-select" id="csMsMonth">
+      <button type="button" class="ms-btn" onclick="toggleMs('csMsMonth')">All Months ▾</button>
+      <div class="ms-panel" id="csMsMonthPanel"></div>
+    </div>
+    <label>Category</label>
+    <div class="multi-select" id="csMsCategory">
+      <button type="button" class="ms-btn" onclick="toggleMs('csMsCategory')">All Categories ▾</button>
+      <div class="ms-panel" id="csMsCategoryPanel"></div>
+    </div>
+    <label>Area</label>
+    <select id="csAreaFilter"><option value="">All Areas</option></select>
+    <label>Store</label>
+    <select id="csStoreFilter"><option value="">All Stores</option></select>
+    <button class="btn-refresh" id="csRefreshBtn" onclick="loadCategorySales()">↻ Refresh</button>
+  </div>
+
+  <div id="csStatusBar" class="status-bar loading">
+    <span class="spinner"></span> Loading category sales...
+  </div>
+
+  <!-- KPI Cards -->
+  <div class="kpi-grid kpi-grid-5" id="csKpiGrid"></div>
+
+  <!-- Charts Row 1: Diff % by Category + Category SOB -->
+  <div class="cs-charts-row">
+    <div class="chart-card">
+      <div class="chart-title">Diff % by Category — vs Last Year</div>
+      <div class="chart-wrap"><canvas id="chartCategoryDiff"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Category SOB %</div>
+      <div class="chart-wrap"><canvas id="chartCategorySOB"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Top & Bottom Sub-Departments -->
+  <div class="chart-card" style="margin-top:14px;">
+    <div class="chart-title">Top & Bottom Sub-Departments by Growth</div>
+    <div class="chart-wrap chart-wrap-tall"><canvas id="chartSubDeptGrowth"></canvas></div>
+  </div>
+
+  <!-- Category Summary Table -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Category Summary <span class="table-meta" id="csCategoryMeta"></span></div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="csCategoryTable">
+        <thead><tr>
+          <th class="sortable" data-col="name">Category</th>
+          <th class="sortable" data-col="subDeptCount">Sub-Depts</th>
+          <th class="sortable" data-col="sales">Sales</th>
+          <th class="sortable" data-col="salesLY">Sales LY</th>
+          <th class="sortable" data-col="diffPct">Diff %</th>
+          <th class="sortable" data-col="diffAmount">Diff Amount</th>
+          <th class="sortable" data-col="sharePct">Share %</th>
+        </tr></thead>
+        <tbody id="csCategoryBody"></tbody>
+        <tfoot id="csCategoryFoot"></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <!-- Sub-Department Detail Table -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">
+      Sub-Department Detail
+      <span class="table-meta">Top 100 by Sales</span>
+      <span class="variance-filters">
+        <button data-var="all" class="active" onclick="csSetVariance('all')">All</button>
+        <button data-var="positive" onclick="csSetVariance('positive')">↑ Positive</button>
+        <button data-var="negative" onclick="csSetVariance('negative')">↓ Negative</button>
+      </span>
+    </div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="csDetailTable">
+        <thead><tr>
+          <th class="sortable" data-col="category">Category</th>
+          <th class="sortable" data-col="storeName">Store Name</th>
+          <th class="sortable" data-col="subDept">Sub-Department</th>
+          <th class="sortable" data-col="sales">Sales</th>
+          <th class="sortable" data-col="salesLY">Sales LY</th>
+          <th class="sortable" data-col="diffPct">Diff %</th>
+          <th class="sortable" data-col="diffAmount">Diff Amount</th>
+        </tr></thead>
+        <tbody id="csDetailBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Sales by Area Table -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Sales by Area</div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="csAreaTable">
+        <thead><tr>
+          <th class="sortable" data-col="area">Area</th>
+          <th class="sortable" data-col="sales">Sales</th>
+          <th class="sortable" data-col="salesLY">Sales YA</th>
+          <th class="sortable" data-col="diffPct">Diff %</th>
+          <th class="sortable" data-col="diffAmount">Diff Amount</th>
+        </tr></thead>
+        <tbody id="csAreaBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Sales per Store Table -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Sales per Store</div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="csStoreTable">
+        <thead><tr>
+          <th class="sortable" data-col="storeId">Store ID</th>
+          <th class="sortable" data-col="storeName">Store Name</th>
+          <th class="sortable" data-col="area">Area</th>
+          <th class="sortable" data-col="sales">Sales</th>
+          <th class="sortable" data-col="salesLY">Sales YA</th>
+          <th class="sortable" data-col="diffPct">Diff %</th>
+          <th class="sortable" data-col="diffAmount">Diff Amount</th>
+        </tr></thead>
+        <tbody id="csStoreBody"></tbody>
+      </table>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -1648,7 +2029,10 @@ const html = `<!DOCTYPE html>
     if (!panel) return;
     const ms = document.getElementById(id);
     // Pick the right loader based on widget id
-    const onChange = id === 'msMonth' ? loadData : (id === 'psMsMonth' ? loadStorePerf : null);
+    const onChange = id === 'msMonth' ? loadData
+                   : id === 'psMsMonth' ? loadStorePerf
+                   : (id === 'csMsMonth' || id === 'csMsCategory') ? loadCategorySales
+                   : null;
     const actions = \`
       <div class="ms-actions">
         <button type="button" data-act="all">Select All</button>
@@ -2063,6 +2447,7 @@ const html = `<!DOCTYPE html>
 
   // Trigger load when user opens this tab for the first time
   let psFirstLoad = false;
+  let csFirstLoad = false;
   const _origSwitch = window.switchTab || switchTab;
   window.switchTab = function(btn, tabId) {
     _origSwitch(btn, tabId);
@@ -2070,7 +2455,389 @@ const html = `<!DOCTYPE html>
       psFirstLoad = true;
       loadPsFilters().then(() => loadStorePerf());
     }
+    if (tabId === 'category' && !csFirstLoad) {
+      csFirstLoad = true;
+      loadCsFilters().then(() => loadCategorySales());
+    }
   };
+
+  // ============ CATEGORY SALES ============
+  const CAT_COLORS = {
+    'Food 1':  '#7B1FA2', 'Food 2': '#388E3C', 'Fresh': '#0288D1',
+    'Non Food': '#F57C00', 'Fashion': '#C2185B', 'Home': '#5E35B1',
+    'Seasonal': '#F9A825', '(uncategorized)': '#757575'
+  };
+  const AREA_COLORS = ['#1B5E20','#7B1FA2','#0288D1','#F57C00','#5E35B1','#C2185B','#00897B','#F9A825','#3949AB','#D84315'];
+  function csCatColor(name) { return CAT_COLORS[name] || '#5C6BC0'; }
+  let _areaColorMap = {};
+  function csAreaColor(name) {
+    if (!_areaColorMap[name]) _areaColorMap[name] = AREA_COLORS[Object.keys(_areaColorMap).length % AREA_COLORS.length];
+    return _areaColorMap[name];
+  }
+  let csFiltersLoaded = false;
+  let csCharts = { catDiff: null, sob: null, subDept: null };
+  let csCurrentData = null;
+  let csVarianceFilter = 'all';
+  let csSorts = {
+    cat:    { col: 'sales', asc: false },
+    detail: { col: 'sales', asc: false },
+    area:   { col: 'sales', asc: false },
+    store:  { col: 'sales', asc: false }
+  };
+
+  function csFmt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    if (Math.abs(n) >= 1000000) return Math.round(n).toLocaleString('en-PH');
+    return n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function csFmtPct(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+  }
+  function csFmtPctPlain(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return n.toFixed(2) + '%';
+  }
+  function csFmtSigned(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + csFmt(n);
+  }
+  function csFmtMoneyCompact(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    const abs = Math.abs(n);
+    const sign = n < 0 ? '-' : '';
+    if (abs >= 1e9) return sign + '₱' + (abs/1e9).toFixed(2) + 'B';
+    if (abs >= 1e6) return sign + '₱' + (abs/1e6).toFixed(2) + 'M';
+    if (abs >= 1e3) return sign + '₱' + (abs/1e3).toFixed(1) + 'K';
+    return sign + '₱' + abs.toFixed(0);
+  }
+
+  async function loadCsFilters() {
+    if (csFiltersLoaded) return;
+    try {
+      const res = await fetch('/api/filters');
+      const f = await res.json();
+      if (!f.ok) return;
+      buildMsPanel('csMsMonth', f.months, 'All Months');
+      const areaSel = document.getElementById('csAreaFilter');
+      f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+      const storeSel = document.getElementById('csStoreFilter');
+      f.stores.forEach(s => storeSel.innerHTML += \`<option value="\${s.id}">\${s.id} - \${s.name}</option>\`);
+      areaSel.addEventListener('change', loadCategorySales);
+      storeSel.addEventListener('change', loadCategorySales);
+      csFiltersLoaded = true;
+    } catch (e) { console.error('cs filter load failed', e); }
+  }
+
+  async function loadCategorySales() {
+    const btn = document.getElementById('csRefreshBtn');
+    const status = document.getElementById('csStatusBar');
+    btn.classList.add('loading');
+    btn.textContent = '⏳ Loading...';
+    status.className = 'status-bar loading';
+    status.innerHTML = '<span class="spinner"></span> Loading category sales...';
+
+    try {
+      const months  = getMsValues('csMsMonth');
+      const cats    = getMsValues('csMsCategory');
+      const areaV   = document.getElementById('csAreaFilter').value;
+      const storeV  = document.getElementById('csStoreFilter').value;
+      const params = new URLSearchParams();
+      if (months.length) params.set('months', months.join(','));
+      if (cats.length)   params.set('categories', cats.join(','));
+      if (areaV)         params.set('area', areaV);
+      if (storeV)        params.set('storeId', storeV);
+
+      const res = await fetch('/api/category-sales?' + params.toString());
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+
+      csCurrentData = data;
+
+      // Populate category multi-select on first load
+      if (data.allCategories && !document.querySelector('#csMsCategoryPanel input')) {
+        buildMsPanel('csMsCategory', data.allCategories, 'All Categories');
+      }
+
+      renderCsKpis(data);
+      renderCsCharts(data);
+      renderCsCategoryTable();
+      renderCsDetailTable();
+      renderCsAreaTable();
+      renderCsStoreTable();
+
+      status.className = 'status-bar';
+      const parts = [];
+      if (months.length) parts.push(months.length <= 3 ? 'Months: ' + months.join(', ') : 'Months: ' + months.length + ' selected');
+      if (cats.length)   parts.push(cats.length <= 2 ? 'Categories: ' + cats.join(', ') : 'Categories: ' + cats.length + ' selected');
+      if (areaV)  parts.push('Area: ' + areaV);
+      if (storeV) parts.push('Store: ' + storeV);
+      const ftxt = parts.join(' · ') || 'No filters';
+      status.innerHTML = \`✅ \${ftxt} · \${data.summary.categoryCount} categories · \${data.summary.subDeptCount} sub-depts · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+    } catch (err) {
+      status.className = 'status-bar error';
+      status.innerHTML = '❌ Error: ' + err.message;
+    } finally {
+      btn.classList.remove('loading');
+      btn.textContent = '↻ Refresh';
+    }
+  }
+
+  function renderCsKpis(data) {
+    const s = data.summary;
+    const cards = [
+      { label: 'Total Sales',  value: csFmtMoneyCompact(s.totalSales),  cls: '',                                        sub: 'Filtered period' },
+      { label: 'Sales LY',     value: csFmtMoneyCompact(s.totalSalesLY), cls: '',                                       sub: 'Same period last year' },
+      { label: 'Diff %',       value: csFmtPct(s.diffPct),               cls: s.diffPct >= 0 ? 'kpi-pos' : 'kpi-neg',   sub: s.diffPct >= 0 ? '↑ vs last year' : '↓ vs last year' },
+      { label: 'Diff Amount',  value: csFmtMoneyCompact(s.diffAmount),   cls: s.diffAmount >= 0 ? 'kpi-pos' : 'kpi-neg',sub: 'variance' },
+      { label: 'Categories',   value: String(s.categoryCount),           cls: '',                                       sub: '↑ ' + s.growthCount + ' growth · ↓ ' + s.declineCount + ' decline' }
+    ];
+    document.getElementById('csKpiGrid').innerHTML = cards.map(c => \`
+      <div class="kpi-card \${c.cls}">
+        <div class="kpi-label">\${c.label}</div>
+        <div class="kpi-value">\${c.value}</div>
+        <div class="kpi-sub">\${c.sub}</div>
+      </div>\`).join('');
+  }
+
+  function csSort(rows, key, asc) {
+    return rows.slice().sort((a, b) => {
+      let va = a[key], vb = b[key];
+      if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      if (va === null || isNaN(va)) va = asc ? Infinity : -Infinity;
+      if (vb === null || isNaN(vb)) vb = asc ? Infinity : -Infinity;
+      return asc ? va - vb : vb - va;
+    });
+  }
+  function csUpdateSortIndicator(tableId, sortState) {
+    document.querySelectorAll('#' + tableId + ' thead th.sortable').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.col === sortState.col) th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  function renderCsCategoryTable() {
+    if (!csCurrentData) return;
+    const rows = csSort(csCurrentData.categories, csSorts.cat.col, csSorts.cat.asc);
+    csUpdateSortIndicator('csCategoryTable', csSorts.cat);
+    document.getElementById('csCategoryBody').innerHTML = rows.map(r => {
+      const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
+      const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.name)}">\${r.name}</span></td>
+        <td>\${r.subDeptCount}</td>
+        <td>\${csFmt(r.sales)}</td>
+        <td>\${csFmt(r.salesLY)}</td>
+        <td class="\${diffCls}">\${r.diffPct === null ? '—' : csFmtPct(r.diffPct)}</td>
+        <td class="\${diffAmtCls}">\${csFmtSigned(r.diffAmount)}</td>
+        <td>\${csFmtPctPlain(r.sharePct)}</td>
+      </tr>\`;
+    }).join('');
+
+    // Footer totals
+    const t = csCurrentData.summary;
+    const totSubDepts = csCurrentData.categories.reduce((s, c) => s + c.subDeptCount, 0);
+    const totDiffCls = t.diffPct === null ? '' : (t.diffPct >= 0 ? 'pos' : 'neg');
+    const totDiffAmtCls = t.diffAmount >= 0 ? 'pos' : 'neg';
+    document.getElementById('csCategoryFoot').innerHTML = \`<tr>
+      <td class="text-col">TOTAL · \${t.categoryCount} CATEGORIES</td>
+      <td>\${totSubDepts}</td>
+      <td>\${csFmt(t.totalSales)}</td>
+      <td>\${csFmt(t.totalSalesLY)}</td>
+      <td class="\${totDiffCls}">\${t.diffPct === null ? '—' : csFmtPct(t.diffPct)}</td>
+      <td class="\${totDiffAmtCls}">\${csFmtSigned(t.diffAmount)}</td>
+      <td>100.00%</td>
+    </tr>\`;
+    document.getElementById('csCategoryMeta').textContent = t.categoryCount + ' categories';
+  }
+
+  function renderCsDetailTable() {
+    if (!csCurrentData) return;
+    let rows = csCurrentData.subDeptDetail.slice();
+    if (csVarianceFilter === 'positive') rows = rows.filter(r => r.diffAmount > 0);
+    else if (csVarianceFilter === 'negative') rows = rows.filter(r => r.diffAmount < 0);
+    rows = csSort(rows, csSorts.detail.col, csSorts.detail.asc);
+    csUpdateSortIndicator('csDetailTable', csSorts.detail);
+    document.getElementById('csDetailBody').innerHTML = rows.map(r => {
+      const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
+      const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.category)}">\${r.category}</span></td>
+        <td class="text-col">\${r.storeName}<div style="font-size:10px;color:#94a094;font-weight:500;">\${r.area || ''}</div></td>
+        <td class="text-col">\${r.subDept}</td>
+        <td>\${csFmt(r.sales)}</td>
+        <td>\${csFmt(r.salesLY)}</td>
+        <td class="\${diffCls}">\${r.diffPct === null ? '—' : csFmtPct(r.diffPct)}</td>
+        <td class="\${diffAmtCls}">\${csFmtSigned(r.diffAmount)}</td>
+      </tr>\`;
+    }).join('');
+  }
+  function csSetVariance(v) {
+    csVarianceFilter = v;
+    document.querySelectorAll('.variance-filters button').forEach(b =>
+      b.classList.toggle('active', b.dataset.var === v));
+    renderCsDetailTable();
+  }
+  window.csSetVariance = csSetVariance;
+
+  function renderCsAreaTable() {
+    if (!csCurrentData) return;
+    const rows = csSort(csCurrentData.areas, csSorts.area.col, csSorts.area.asc);
+    csUpdateSortIndicator('csAreaTable', csSorts.area);
+    document.getElementById('csAreaBody').innerHTML = rows.map(r => {
+      const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
+      const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area}</span></td>
+        <td>\${csFmt(r.sales)}</td>
+        <td>\${csFmt(r.salesLY)}</td>
+        <td class="\${diffCls}">\${r.diffPct === null ? '—' : csFmtPct(r.diffPct)}</td>
+        <td class="\${diffAmtCls}">\${csFmtSigned(r.diffAmount)}</td>
+      </tr>\`;
+    }).join('');
+  }
+
+  function renderCsStoreTable() {
+    if (!csCurrentData) return;
+    const rows = csSort(csCurrentData.stores, csSorts.store.col, csSorts.store.asc);
+    csUpdateSortIndicator('csStoreTable', csSorts.store);
+    document.getElementById('csStoreBody').innerHTML = rows.map(r => {
+      const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
+      const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col">#\${r.storeId}</td>
+        <td class="text-col">\${r.storeName}</td>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area || '—'}</span></td>
+        <td>\${csFmt(r.sales)}</td>
+        <td>\${csFmt(r.salesLY)}</td>
+        <td class="\${diffCls}">\${r.diffPct === null ? '—' : csFmtPct(r.diffPct)}</td>
+        <td class="\${diffAmtCls}">\${csFmtSigned(r.diffAmount)}</td>
+      </tr>\`;
+    }).join('');
+  }
+
+  // Sort click handler for all category sales tables
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('#csCategoryTable thead th.sortable, #csDetailTable thead th.sortable, #csAreaTable thead th.sortable, #csStoreTable thead th.sortable');
+    if (!th || !csCurrentData) return;
+    const tableId = th.closest('table').id;
+    const col = th.dataset.col;
+    const sortKey = tableId === 'csCategoryTable' ? 'cat'
+                  : tableId === 'csDetailTable'   ? 'detail'
+                  : tableId === 'csAreaTable'     ? 'area' : 'store';
+    if (csSorts[sortKey].col === col) csSorts[sortKey].asc = !csSorts[sortKey].asc;
+    else { csSorts[sortKey].col = col; csSorts[sortKey].asc = false; }
+    if (sortKey === 'cat')    renderCsCategoryTable();
+    if (sortKey === 'detail') renderCsDetailTable();
+    if (sortKey === 'area')   renderCsAreaTable();
+    if (sortKey === 'store')  renderCsStoreTable();
+  });
+
+  function renderCsCharts(data) {
+    Object.values(csCharts).forEach(c => { if (c) c.destroy(); });
+    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
+      Chart.register(window.ChartDataLabels);
+      Chart._datalabelsRegistered = true;
+    }
+    const GREEN = '#2E7D32', RED = '#C62828';
+    const compactNum = v => {
+      const abs = Math.abs(v);
+      if (abs >= 1e9) return (v/1e9).toFixed(1) + 'B';
+      if (abs >= 1e6) return (v/1e6).toFixed(1) + 'M';
+      if (abs >= 1e3) return (v/1e3).toFixed(0) + 'K';
+      return Math.round(v).toString();
+    };
+
+    // 1) Diff % by Category (vertical bar)
+    csCharts.catDiff = new Chart(document.getElementById('chartCategoryDiff'), {
+      type: 'bar',
+      data: {
+        labels: data.categories.map(c => c.name),
+        datasets: [{
+          data: data.categories.map(c => c.diffPct === null ? 0 : c.diffPct),
+          backgroundColor: data.categories.map(c => (c.diffPct >= 0 ? '#66BB6A' : '#EF5350')),
+          borderColor: data.categories.map(c => (c.diffPct >= 0 ? GREEN : RED)),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 10, weight: 700 },
+            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } }
+        }
+      }
+    });
+
+    // 2) Category SOB % (donut)
+    csCharts.sob = new Chart(document.getElementById('chartCategorySOB'), {
+      type: 'doughnut',
+      data: {
+        labels: data.categories.map(c => c.name),
+        datasets: [{
+          data: data.categories.map(c => c.sharePct),
+          backgroundColor: data.categories.map(c => csCatColor(c.name)),
+          borderColor: '#fff', borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        cutout: '55%',
+        plugins: {
+          legend: { position: 'right', labels: { font: { size: 10 }, color: '#444', boxWidth: 12 } },
+          datalabels: {
+            color: '#fff',
+            font: { size: 10, weight: 700 },
+            formatter: (v, ctx) => v < 2 ? '' : ctx.chart.data.labels[ctx.dataIndex] + '\\n' + v.toFixed(1) + '%',
+            textAlign: 'center'
+          }
+        }
+      }
+    });
+
+    // 3) Top & Bottom Sub-Departments (horizontal bar)
+    const sg = data.subDeptGrowth;
+    csCharts.subDept = new Chart(document.getElementById('chartSubDeptGrowth'), {
+      type: 'bar',
+      data: {
+        labels: sg.map(s => s.subDept),
+        datasets: [{
+          label: 'Diff Amount',
+          data: sg.map(s => s.diffAmount),
+          backgroundColor: sg.map(s => s.diffAmount >= 0 ? '#66BB6A' : '#EF5350'),
+          borderColor: sg.map(s => s.diffAmount >= 0 ? GREEN : RED),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        indexAxis: 'y',
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 4,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 10, weight: 700 },
+            formatter: v => (v >= 0 ? '+₱' : '-₱') + compactNum(Math.abs(v))
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => '₱' + compactNum(v) }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 10, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        }
+      }
+    });
+  }
+  // ============ END CATEGORY SALES ============
 
   // Auto-load on page open
   (async () => {
