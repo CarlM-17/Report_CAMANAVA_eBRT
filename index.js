@@ -82,6 +82,133 @@ app.get('/api/filters', async (req, res) => {
   }
 });
 
+// Per Store Sales Performance endpoint
+app.get('/api/store-performance', async (req, res) => {
+  try {
+    const { area, month } = req.query;
+
+    const [salesRows, targetRows, storeRows] = await Promise.all([
+      fetchSheet(SHEET_NAME),
+      fetchSheet('SalesTarget'),
+      fetchSheet('ListOfStores')
+    ]);
+
+    // Build store lookup (Store ID -> name + area from ListOfStores)
+    const storeAreaMap = {};
+    const storeNameMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      const ar  = (r[2] || '').trim();
+      const nm  = (r[4] || '').trim();
+      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
+    });
+
+    const passMonth = (m) => !month || (m || '').toString().trim().toLowerCase() === month.toLowerCase();
+
+    // Index SalesData by store (also build monthly trend - all months for chart)
+    const salesByStore = {};  // sid -> {sC, sY}
+    const monthlyTrend = {};  // monthName -> {sC, sY}
+    salesRows.slice(1).forEach(cols => {
+      if (!cols[5] && !cols[6]) return;
+      const sid = (cols[3] || '').trim();
+      const m = cols[0];
+      const ar = storeAreaMap[sid] || '';
+      if (area && ar.toLowerCase() !== area.toLowerCase()) return;
+
+      if (passMonth(m)) {
+        if (!salesByStore[sid]) salesByStore[sid] = { sC: 0, sY: 0 };
+        salesByStore[sid].sC += num(cols[5]);
+        salesByStore[sid].sY += num(cols[6]);
+      }
+      if (m) {
+        const mk = (m || '').toString().trim();
+        if (!monthlyTrend[mk]) monthlyTrend[mk] = { sC: 0, sY: 0 };
+        monthlyTrend[mk].sC += num(cols[5]);
+        monthlyTrend[mk].sY += num(cols[6]);
+      }
+    });
+
+    // Index SalesTarget by store
+    const targetByStore = {};
+    targetRows.slice(1).forEach(cols => {
+      const sid = (cols[3] || '').trim();
+      const m = cols[0];
+      const ar = storeAreaMap[sid] || '';
+      if (area && ar.toLowerCase() !== area.toLowerCase()) return;
+      if (!passMonth(m)) return;
+      if (!targetByStore[sid]) targetByStore[sid] = 0;
+      targetByStore[sid] += num(cols[5]);
+    });
+
+    // Build rows
+    const stores = storeRows.slice(1)
+      .filter(r => r[3] && r[3].trim() !== '')
+      .filter(r => !area || (r[2] || '').toLowerCase() === area.toLowerCase());
+
+    const rows = stores.map(r => {
+      const sid  = (r[3] || '').trim();
+      const name = (r[4] || '').trim();
+      const ar   = (r[2] || '').trim();
+      const s    = salesByStore[sid] || { sC: 0, sY: 0 };
+      const target = targetByStore[sid] || 0;
+      const sales = s.sC;
+      const salesYA = s.sY;
+      const index   = salesYA !== 0 ? (sales / salesYA) * 100 : 0;
+      const growth  = salesYA !== 0 ? ((sales - salesYA) / Math.abs(salesYA)) * 100 : 0;
+      const valueVsYA = sales - salesYA;
+      const pctVsTarget   = target !== 0 ? (sales / target) * 100 : 0;
+      const valueVsTarget = sales - target;
+      return {
+        storeId: sid, storeName: name, area: ar,
+        sales, salesYA, index, growth, valueVsYA,
+        target, pctVsTarget, valueVsTarget
+      };
+    });
+
+    // Total row
+    const total = {
+      storeName: 'TOTAL',
+      sales:   rows.reduce((s, r) => s + r.sales, 0),
+      salesYA: rows.reduce((s, r) => s + r.salesYA, 0),
+      target:  rows.reduce((s, r) => s + r.target, 0)
+    };
+    total.index = total.salesYA !== 0 ? (total.sales / total.salesYA) * 100 : 0;
+    total.growth = total.salesYA !== 0 ? ((total.sales - total.salesYA) / Math.abs(total.salesYA)) * 100 : 0;
+    total.valueVsYA = total.sales - total.salesYA;
+    total.pctVsTarget = total.target !== 0 ? (total.sales / total.target) * 100 : 0;
+    total.valueVsTarget = total.sales - total.target;
+
+    // Charts data
+    const MONTHS_ORDER = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const trendData = MONTHS_ORDER
+      .map(m => ({ month: m, sC: (monthlyTrend[m] || {}).sC || 0, sY: (monthlyTrend[m] || {}).sY || 0 }))
+      .filter(d => d.sC > 0 || d.sY > 0);
+
+    // Growth Per Area
+    const areaAgg = {};
+    rows.forEach(r => {
+      if (!areaAgg[r.area]) areaAgg[r.area] = { sC: 0, sY: 0 };
+      areaAgg[r.area].sC += r.sales;
+      areaAgg[r.area].sY += r.salesYA;
+    });
+    const areaGrowth = Object.entries(areaAgg).map(([ar, v]) => ({
+      area: ar,
+      growth: v.sY !== 0 ? ((v.sC - v.sY) / Math.abs(v.sY)) * 100 : 0
+    }));
+
+    res.json({
+      ok: true,
+      filters: { area: area || null, month: month || null },
+      rows,
+      total,
+      trendData,
+      areaGrowth
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/data', async (req, res) => {
   const t0 = Date.now();
   try {
@@ -736,7 +863,68 @@ const html = `<!DOCTYPE html>
   .table-wrapper::-webkit-scrollbar { height: 6px; }
   .table-wrapper::-webkit-scrollbar-thumb { background: #C8E6C9; border-radius: 3px; }
   .table-wrapper::-webkit-scrollbar-track { background: #f4f6f4; }
+
+  /* ===== PER STORE SALES PERFORMANCE ===== */
+  .ps-table {
+    width: 100%; min-width: 1100px;
+    border-collapse: collapse; font-size: 11.5px;
+    table-layout: auto;
+  }
+  .ps-table thead th {
+    background: #2E7D32; color: white; font-weight: 700;
+    font-size: 10.5px; padding: 9px 10px;
+    text-align: center; letter-spacing: 0.4px;
+    text-transform: uppercase;
+    border-bottom: 2px solid #FFC107;
+  }
+  .ps-table thead th.store-col { text-align: left; padding-left: 14px; width: 200px; }
+  .ps-table tbody td {
+    padding: 7px 10px; border-bottom: 1px solid #f0f2ef;
+    text-align: right; font-variant-numeric: tabular-nums;
+    font-weight: 500; color: #3d4a40;
+  }
+  .ps-table tbody td.store-col {
+    text-align: left; padding-left: 14px;
+    color: #1a2e1f; font-weight: 600; white-space: nowrap;
+  }
+  .ps-table tbody tr:hover td { background: #FFF176; transition: background 0.15s; }
+  .ps-table tbody tr:nth-child(even) td { background: #fafbf9; }
+  .ps-table tbody tr:nth-child(even):hover td { background: #FFF176; }
+  .ps-table tfoot td {
+    padding: 9px 10px; font-weight: 800;
+    background: linear-gradient(90deg, #FFF8E1 0%, #FFF9C4 100%);
+    border-top: 2px solid #FFC107; border-bottom: 2px solid #FFC107;
+    color: #1B5E20; text-align: right;
+    font-variant-numeric: tabular-nums; font-size: 12px;
+  }
+  .ps-table tfoot td.store-col { text-align: left; padding-left: 14px; }
+  .ps-table .pos { color: #2E7D32; font-weight: 700; }
+  .ps-table .neg { color: #C62828; font-weight: 700; }
+
+  /* Charts grid */
+  .charts-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    margin-top: 16px;
+  }
+  .chart-card {
+    background: white; border-radius: 10px;
+    border: 1px solid #e8ebe8; padding: 14px 16px;
+  }
+  .chart-title {
+    font-size: 13px; font-weight: 700; color: #1B5E20;
+    padding-left: 10px; border-left: 4px solid #FFC107;
+    margin-bottom: 12px; letter-spacing: 0.3px;
+  }
+  .chart-wrap { position: relative; height: 260px; }
+  .chart-wrap-tall { height: 340px; }
+
+  @media (max-width: 900px) {
+    .charts-grid { grid-template-columns: 1fr; }
+    .chart-wrap { height: 220px; }
+    .chart-wrap-tall { height: 280px; }
+  }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -747,7 +935,7 @@ const html = `<!DOCTYPE html>
 
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab(this, 'daily')">Daily Sales</button>
-  <button class="tab-btn" onclick="switchTab(this, 'monthly')">Monthly Sales</button>
+  <button class="tab-btn" onclick="switchTab(this, 'monthly')">Per Store Sales Performance</button>
   <button class="tab-btn" onclick="switchTab(this, 'category')">Category Sales</button>
 </div>
 
@@ -817,9 +1005,63 @@ const html = `<!DOCTYPE html>
   <div class="footer" id="footerText">CAMANAVA Region · Data Source: Google Sheets</div>
 </div>
 
-<!-- MONTHLY TAB -->
+<!-- PER STORE SALES PERFORMANCE TAB -->
 <div id="tab-monthly" class="content" style="display:none;">
-  <div style="text-align:center; padding: 60px; color: #aaa; font-size:14px;">Monthly Sales tab — coming soon</div>
+
+  <div class="filter-bar">
+    <label>Month</label>
+    <select id="psMonthFilter"><option value="">All Months</option></select>
+    <label>Area</label>
+    <select id="psAreaFilter"><option value="">All Areas</option></select>
+    <button class="btn-refresh" id="psRefreshBtn" onclick="loadStorePerf()">↻ Refresh</button>
+  </div>
+
+  <div id="psStatusBar" class="status-bar loading">
+    <span class="spinner"></span> Loading store performance...
+  </div>
+
+  <!-- Main Performance Table -->
+  <div class="table-card">
+    <div class="table-wrapper">
+      <table id="psTable" class="ps-table">
+        <thead>
+          <tr>
+            <th class="store-col">Store Name</th>
+            <th>Sales</th>
+            <th>Sales YA</th>
+            <th>Index</th>
+            <th>Value vs YA</th>
+            <th>Target</th>
+            <th>% vs Target</th>
+            <th>Value vs Target</th>
+          </tr>
+        </thead>
+        <tbody id="psTableBody"></tbody>
+        <tfoot id="psTableFoot"></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <!-- Charts grid (2x2) -->
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">Monthly Sales Trend</div>
+      <div class="chart-wrap"><canvas id="chartTrend"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Growth Per Area</div>
+      <div class="chart-wrap"><canvas id="chartAreaGrowth"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Target Achievement per Store</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="chartTarget"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Growth vs LY % per Store</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="chartGrowth"></canvas></div>
+    </div>
+  </div>
+
 </div>
 
 <!-- CATEGORY TAB -->
@@ -1275,6 +1517,238 @@ const html = `<!DOCTYPE html>
     });
     storeSel.value = prev; // preserve selection if still valid
   }
+
+  // ========= PER STORE SALES PERFORMANCE =========
+  let psFiltersLoaded = false;
+  let psCharts = { trend: null, area: null, target: null, growth: null };
+
+  async function loadPsFilters() {
+    if (psFiltersLoaded) return;
+    try {
+      const res = await fetch('/api/filters');
+      const f = await res.json();
+      if (!f.ok) return;
+      const monthSel = document.getElementById('psMonthFilter');
+      f.months.forEach(m => monthSel.innerHTML += \`<option value="\${m}">\${m}</option>\`);
+      const areaSel  = document.getElementById('psAreaFilter');
+      f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+      monthSel.addEventListener('change', loadStorePerf);
+      areaSel.addEventListener('change', loadStorePerf);
+      psFiltersLoaded = true;
+    } catch (e) { console.error('ps filter load failed', e); }
+  }
+
+  // Format helpers for Per Store table
+  function psFmt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function psFmtSigned(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    const sign = n >= 0 ? '' : '';
+    return sign + psFmt(n);
+  }
+  function psFmtPct(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return n.toFixed(2) + '%';
+  }
+
+  async function loadStorePerf() {
+    const btn = document.getElementById('psRefreshBtn');
+    const status = document.getElementById('psStatusBar');
+    btn.classList.add('loading');
+    btn.textContent = '⏳ Loading...';
+    status.className = 'status-bar loading';
+    status.innerHTML = '<span class="spinner"></span> Loading store performance...';
+
+    try {
+      const month = document.getElementById('psMonthFilter').value;
+      const areaV = document.getElementById('psAreaFilter').value;
+      const params = new URLSearchParams();
+      if (month) params.set('month', month);
+      if (areaV) params.set('area', areaV);
+
+      const res = await fetch('/api/store-performance?' + params.toString());
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+
+      renderPsTable(data);
+      renderPsCharts(data);
+
+      status.className = 'status-bar';
+      const ftxt = [
+        month ? 'Month: ' + month : null,
+        areaV ? 'Area: ' + areaV : null
+      ].filter(Boolean).join(' · ') || 'No filters';
+      status.innerHTML = \`✅ \${ftxt} · \${data.rows.length} stores · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+    } catch (err) {
+      status.className = 'status-bar error';
+      status.innerHTML = '❌ Error: ' + err.message;
+    } finally {
+      btn.classList.remove('loading');
+      btn.textContent = '↻ Refresh';
+    }
+  }
+
+  function renderPsTable(data) {
+    const body = document.getElementById('psTableBody');
+    body.innerHTML = data.rows.map(r => {
+      const valYAClass = r.valueVsYA >= 0 ? 'pos' : 'neg';
+      const valTgtClass = r.valueVsTarget >= 0 ? 'pos' : 'neg';
+      const pctTgtClass = r.pctVsTarget >= 100 ? 'pos' : 'neg';
+      const indexClass  = r.index >= 100 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="store-col">\${r.storeName || r.storeId}</td>
+        <td>\${psFmt(r.sales)}</td>
+        <td>\${psFmt(r.salesYA)}</td>
+        <td class="\${indexClass}">\${psFmtPct(r.index)}</td>
+        <td class="\${valYAClass}">\${psFmt(r.valueVsYA)}</td>
+        <td>\${psFmt(r.target)}</td>
+        <td class="\${pctTgtClass}">\${psFmtPct(r.pctVsTarget)}</td>
+        <td class="\${valTgtClass}">\${psFmt(r.valueVsTarget)}</td>
+      </tr>\`;
+    }).join('');
+
+    const t = data.total;
+    const foot = document.getElementById('psTableFoot');
+    const tValYAClass = t.valueVsYA >= 0 ? 'pos' : 'neg';
+    const tValTgtClass = t.valueVsTarget >= 0 ? 'pos' : 'neg';
+    const tPctTgtClass = t.pctVsTarget >= 100 ? 'pos' : 'neg';
+    const tIndexClass  = t.index >= 100 ? 'pos' : 'neg';
+    foot.innerHTML = \`<tr>
+      <td class="store-col">\${t.storeName}</td>
+      <td>\${psFmt(t.sales)}</td>
+      <td>\${psFmt(t.salesYA)}</td>
+      <td class="\${tIndexClass}">\${psFmtPct(t.index)}</td>
+      <td class="\${tValYAClass}">\${psFmt(t.valueVsYA)}</td>
+      <td>\${psFmt(t.target)}</td>
+      <td class="\${tPctTgtClass}">\${psFmtPct(t.pctVsTarget)}</td>
+      <td class="\${tValTgtClass}">\${psFmt(t.valueVsTarget)}</td>
+    </tr>\`;
+  }
+
+  function renderPsCharts(data) {
+    // Destroy old charts before recreating
+    Object.values(psCharts).forEach(c => { if (c) c.destroy(); });
+
+    const GREEN = '#1B5E20';
+    const GREEN_LIGHT = '#66BB6A';
+    const YELLOW = '#FFC107';
+    const RED = '#C62828';
+    const commonOpts = {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { font: { size: 11 }, color: '#444' } } },
+      scales: {
+        x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } },
+        y: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } }
+      }
+    };
+
+    // 1) Monthly Sales Trend (line, Current vs YA)
+    psCharts.trend = new Chart(document.getElementById('chartTrend'), {
+      type: 'line',
+      data: {
+        labels: data.trendData.map(d => d.month.substring(0,3)),
+        datasets: [
+          { label: 'Current', data: data.trendData.map(d => d.sC),
+            borderColor: GREEN, backgroundColor: 'rgba(27,94,32,0.1)',
+            borderWidth: 2.5, tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: GREEN },
+          { label: 'Year Ago', data: data.trendData.map(d => d.sY),
+            borderColor: YELLOW, backgroundColor: 'rgba(255,193,7,0.05)',
+            borderWidth: 2, tension: 0.3, borderDash: [5,4], pointRadius: 3, pointBackgroundColor: YELLOW }
+        ]
+      },
+      options: {
+        ...commonOpts,
+        scales: {
+          ...commonOpts.scales,
+          y: { ...commonOpts.scales.y, ticks: { ...commonOpts.scales.y.ticks,
+            callback: v => (v >= 1e9 ? (v/1e9).toFixed(1)+'B' : v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : v) } }
+        }
+      }
+    });
+
+    // 2) Growth Per Area (bar)
+    psCharts.area = new Chart(document.getElementById('chartAreaGrowth'), {
+      type: 'bar',
+      data: {
+        labels: data.areaGrowth.map(d => d.area),
+        datasets: [{
+          label: 'Growth %',
+          data: data.areaGrowth.map(d => d.growth),
+          backgroundColor: data.areaGrowth.map(d => d.growth >= 0 ? GREEN_LIGHT : RED),
+          borderColor: data.areaGrowth.map(d => d.growth >= 0 ? GREEN : RED),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        ...commonOpts,
+        plugins: { legend: { display: false } },
+        scales: { ...commonOpts.scales, y: { ...commonOpts.scales.y, ticks: { ...commonOpts.scales.y.ticks, callback: v => v + '%' } } }
+      }
+    });
+
+    // 3) Target Achievement per Store (horizontal bar - easier to read store names)
+    const sortedByTgt = [...data.rows].sort((a,b) => b.pctVsTarget - a.pctVsTarget);
+    psCharts.target = new Chart(document.getElementById('chartTarget'), {
+      type: 'bar',
+      data: {
+        labels: sortedByTgt.map(r => r.storeName),
+        datasets: [{
+          label: '% vs Target',
+          data: sortedByTgt.map(r => r.pctVsTarget),
+          backgroundColor: sortedByTgt.map(r => r.pctVsTarget >= 100 ? GREEN_LIGHT : YELLOW),
+          borderColor: sortedByTgt.map(r => r.pctVsTarget >= 100 ? GREEN : '#F57F17'),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        ...commonOpts,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#555', font: { size: 9 } }, grid: { display: false } }
+        }
+      }
+    });
+
+    // 4) Growth vs LY % per Store (horizontal bar)
+    const sortedByGrowth = [...data.rows].sort((a,b) => b.growth - a.growth);
+    psCharts.growth = new Chart(document.getElementById('chartGrowth'), {
+      type: 'bar',
+      data: {
+        labels: sortedByGrowth.map(r => r.storeName),
+        datasets: [{
+          label: 'Growth %',
+          data: sortedByGrowth.map(r => r.growth),
+          backgroundColor: sortedByGrowth.map(r => r.growth >= 0 ? GREEN_LIGHT : RED),
+          borderColor: sortedByGrowth.map(r => r.growth >= 0 ? GREEN : RED),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        ...commonOpts,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#555', font: { size: 9 } }, grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  // Trigger load when user opens this tab for the first time
+  let psFirstLoad = false;
+  const _origSwitch = window.switchTab || switchTab;
+  window.switchTab = function(btn, tabId) {
+    _origSwitch(btn, tabId);
+    if (tabId === 'monthly' && !psFirstLoad) {
+      psFirstLoad = true;
+      loadPsFilters().then(() => loadStorePerf());
+    }
+  };
 
   // Auto-load on page open
   (async () => {
