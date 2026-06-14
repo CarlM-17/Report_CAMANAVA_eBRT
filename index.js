@@ -286,6 +286,7 @@ app.get('/api/category-sales', async (req, res) => {
     const byStore = {};      // storeId -> { storeName, area, sales, salesLY }
     const allCategorySet = new Set();
     const allSubDeptSet = new Set();
+    const subDeptsByCategorySet = {};   // category -> Set of subdept names (pre-filter)
     let totalSales = 0, totalSalesLY = 0;
 
     catRows.slice(1).forEach(cols => {
@@ -301,6 +302,10 @@ app.get('/api/category-sales', async (req, res) => {
       // Always collect category/subdept lists for dropdown population
       if (category) allCategorySet.add(category);
       if (subDept)  allSubDeptSet.add(subDept);
+      if (category && subDept) {
+        if (!subDeptsByCategorySet[category]) subDeptsByCategorySet[category] = new Set();
+        subDeptsByCategorySet[category].add(subDept);
+      }
 
       // Apply MAIN filters
       if (!passMonth(m)) return;
@@ -403,7 +408,10 @@ app.get('/api/category-sales', async (req, res) => {
       },
       categories, subDeptGrowth, subDeptDetail, areas, stores,
       allCategories: [...allCategorySet].sort(),
-      allSubDepts:   [...allSubDeptSet].sort()
+      allSubDepts:   [...allSubDeptSet].sort(),
+      subDeptsByCategory: Object.fromEntries(
+        Object.entries(subDeptsByCategorySet).map(([cat, set]) => [cat, [...set].sort()])
+      )
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1343,6 +1351,11 @@ const html = `<!DOCTYPE html>
     font-size: 12px; color: #1a2e1f; background: white; min-width: 160px;
   }
   .bd-filters select:focus { outline: none; border-color: #1B5E20; }
+  .bd-search-input {
+    border: 1px solid #d4dad4; border-radius: 6px; padding: 6px 10px;
+    font-size: 12px; color: #1a2e1f; background: white; width: 130px;
+  }
+  .bd-search-input:focus { outline: none; border-color: #1B5E20; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
@@ -1593,6 +1606,7 @@ const html = `<!DOCTYPE html>
         <label>Category</label>
         <select id="csBdCategory"><option value="">All Categories</option></select>
         <label>Sub-Dept</label>
+        <input type="text" id="csBdSubDeptSearch" class="bd-search-input" placeholder="Search…" />
         <select id="csBdSubDept"><option value="">All Sub-Depts</option></select>
       </div>
     </div>
@@ -2524,6 +2538,8 @@ const html = `<!DOCTYPE html>
   let csCharts = { catDiff: null, sob: null, subDept: null };
   let csCurrentData = null;
   let csVarianceFilter = 'all';
+  let csSubDeptsByCategory = null;   // { catName: [subDepts...] }
+  let csAllSubDepts = null;          // full list (when no category bd filter)
   let csSorts = {
     cat:    { col: 'sales', asc: false },
     detail: { col: 'sales', asc: false },
@@ -2558,6 +2574,34 @@ const html = `<!DOCTYPE html>
     return sign + '₱' + abs.toFixed(0);
   }
 
+  // Rebuild Sub-Dept dropdown based on selected Category + search text
+  function csRebuildSubDeptDropdown() {
+    const cat = document.getElementById('csBdCategory').value;
+    const searchEl = document.getElementById('csBdSubDeptSearch');
+    const search = (searchEl ? searchEl.value : '').trim().toLowerCase();
+    const select = document.getElementById('csBdSubDept');
+    if (!select) return;
+    const currentVal = select.value;
+
+    // Source list: filtered by category if active, else full list
+    let list = (cat && csSubDeptsByCategory && csSubDeptsByCategory[cat])
+               ? csSubDeptsByCategory[cat]
+               : (csAllSubDepts || []);
+    // Apply search
+    if (search) list = list.filter(s => s.toLowerCase().includes(search));
+
+    select.innerHTML = '<option value="">All Sub-Depts</option>' +
+      list.map(s => \`<option value="\${s}">\${s}</option>\`).join('');
+
+    // Restore selection if still valid; otherwise clear and refetch
+    if (currentVal && list.includes(currentVal)) {
+      select.value = currentVal;
+    } else if (currentVal) {
+      select.value = '';
+      loadCategorySales();
+    }
+  }
+
   async function loadCsFilters() {
     if (csFiltersLoaded) return;
     try {
@@ -2571,8 +2615,12 @@ const html = `<!DOCTYPE html>
       f.stores.forEach(s => storeSel.innerHTML += \`<option value="\${s.id}">\${s.id} - \${s.name}</option>\`);
       areaSel.addEventListener('change', loadCategorySales);
       storeSel.addEventListener('change', loadCategorySales);
-      document.getElementById('csBdCategory').addEventListener('change', loadCategorySales);
+      document.getElementById('csBdCategory').addEventListener('change', () => {
+        csRebuildSubDeptDropdown();
+        loadCategorySales();
+      });
       document.getElementById('csBdSubDept').addEventListener('change', loadCategorySales);
+      document.getElementById('csBdSubDeptSearch').addEventListener('input', csRebuildSubDeptDropdown);
       csFiltersLoaded = true;
     } catch (e) { console.error('cs filter load failed', e); }
   }
@@ -2610,14 +2658,15 @@ const html = `<!DOCTYPE html>
       if (data.allCategories && !document.querySelector('#csMsCategoryPanel input')) {
         buildMsPanel('csMsCategory', data.allCategories, 'All Categories');
       }
-      // Populate breakdown dropdowns on first load
+      // Populate breakdown Category dropdown + capture subdept mapping on first load
       if (data.allCategories && document.getElementById('csBdCategory').options.length <= 1) {
         const bdc = document.getElementById('csBdCategory');
         data.allCategories.forEach(c => bdc.innerHTML += \`<option value="\${c}">\${c}</option>\`);
       }
-      if (data.allSubDepts && document.getElementById('csBdSubDept').options.length <= 1) {
-        const bds = document.getElementById('csBdSubDept');
-        data.allSubDepts.forEach(s => bds.innerHTML += \`<option value="\${s}">\${s}</option>\`);
+      if (data.subDeptsByCategory && !csSubDeptsByCategory) {
+        csSubDeptsByCategory = data.subDeptsByCategory;
+        csAllSubDepts = data.allSubDepts || [];
+        csRebuildSubDeptDropdown();
       }
 
       renderCsKpis(data);
