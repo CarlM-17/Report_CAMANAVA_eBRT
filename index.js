@@ -1,9 +1,121 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const SHEET_ID = '1b7-04u_kq491RTzjJdT_DlJhL4oWIiKah9rJbqdHAZg';
 const SHEET_NAME = 'SalesData';
+
+// ========== AUTH SETUP ==========
+const JWT_SECRET   = process.env.JWT_SECRET || 'CHANGE-ME-SET-JWT_SECRET-IN-RAILWAY';
+const TOKEN_COOKIE = 'ebrt_token';
+const TOKEN_TTL_HOURS = 8;
+let USERS = [];
+try { USERS = JSON.parse(process.env.USERS || '[]'); }
+catch (e) { console.error('USERS env var is not valid JSON:', e.message); USERS = []; }
+
+function getCookie(req, name) {
+  const cookie = req.headers.cookie || '';
+  const m = cookie.match(new RegExp('(?:^|; )' + name + '=([^;]+)'));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function authMiddleware(req, res, next) {
+  // Allow login routes without auth
+  if (req.path === '/login' || req.path === '/api/login') return next();
+
+  const token = getCookie(req, TOKEN_COOKIE);
+  if (!token) {
+    if (req.path.startsWith('/api/')) return res.status(401).json({ ok: false, error: 'Not authenticated' });
+    return res.redirect('/login');
+  }
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (e) {
+    if (req.path.startsWith('/api/')) return res.status(401).json({ ok: false, error: 'Session expired' });
+    return res.redirect('/login');
+  }
+}
+
+// Compute the user's effective area/store scope for any data endpoint
+function getUserScope(req) {
+  const u = req.user || {};
+  const requestedArea  = (req.query.area || '').trim();
+  const requestedStore = (req.query.storeId || '').trim();
+  const userAreas  = (u.allowedAreas  && u.allowedAreas.length)  ? u.allowedAreas  : null;
+  const userStores = (u.allowedStores && u.allowedStores.length) ? u.allowedStores : null;
+
+  let areas = null;
+  if (userAreas) {
+    if (requestedArea) {
+      if (!userAreas.some(a => a.toLowerCase() === requestedArea.toLowerCase())) {
+        const err = new Error('Area not allowed for this user');
+        err.statusCode = 403;
+        throw err;
+      }
+      areas = [requestedArea];
+    } else {
+      areas = userAreas;
+    }
+  } else if (requestedArea) {
+    areas = [requestedArea];
+  }
+
+  let stores = null;
+  if (userStores) {
+    if (requestedStore) {
+      if (!userStores.includes(requestedStore)) {
+        const err = new Error('Store not allowed for this user');
+        err.statusCode = 403;
+        throw err;
+      }
+      stores = [requestedStore];
+    } else {
+      stores = userStores;
+    }
+  } else if (requestedStore) {
+    stores = [requestedStore];
+  }
+
+  return {
+    areaSet:  areas  ? new Set(areas.map(a => a.toLowerCase())) : null,
+    storeSet: stores ? new Set(stores) : null
+  };
+}
+
+app.use(express.json());
+app.use(authMiddleware);
+
+// Login page
+app.get('/login', (req, res) => res.send(loginHtml));
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).json({ ok: false, error: 'Username and password required' });
+  const user = USERS.find(u => u.username === username && u.password === password);
+  if (!user) return res.status(401).json({ ok: false, error: 'Invalid username or password' });
+  const payload = {
+    username: user.username,
+    role: user.role || 'viewer',
+    allowedAreas: user.allowedAreas || null,
+    allowedStores: user.allowedStores || null
+  };
+  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_TTL_HOURS + 'h' });
+  res.setHeader('Set-Cookie',
+    `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${TOKEN_TTL_HOURS * 3600}`);
+  res.json({ ok: true });
+});
+
+app.post('/api/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `${TOKEN_COOKIE}=; Path=/; HttpOnly; Max-Age=0`);
+  res.json({ ok: true });
+});
+
+app.get('/api/me', (req, res) => {
+  res.json({ ok: true, user: req.user });
+});
+// ========== END AUTH SETUP ==========
 
 // Parse CSV properly - handles commas inside quoted values (like large numbers)
 function parseCSV(text) {
@@ -66,25 +178,38 @@ app.get('/api/filters', async (req, res) => {
 
     // ListOfStores - B=Region, C=Area, D=Store ID, E=Store Name
     const storeRows = stores.slice(1).filter(r => r[3] && r[3].trim() !== '');
-    const areas = [...new Set(storeRows.map(r => (r[2] || '').trim()).filter(Boolean))].sort();
-    const storeList = storeRows.map(r => ({
+    let areas = [...new Set(storeRows.map(r => (r[2] || '').trim()).filter(Boolean))].sort();
+    let storeList = storeRows.map(r => ({
       area:    (r[2] || '').trim(),
       storeId: (r[3] || '').trim(),
       name:    (r[4] || '').trim()
     }));
+
+    // Apply user restrictions
+    const u = req.user || {};
+    if (u.allowedAreas && u.allowedAreas.length) {
+      const set = new Set(u.allowedAreas.map(a => a.toLowerCase()));
+      areas = areas.filter(a => set.has(a.toLowerCase()));
+      storeList = storeList.filter(s => set.has((s.area || '').toLowerCase()));
+    }
+    if (u.allowedStores && u.allowedStores.length) {
+      const set = new Set(u.allowedStores);
+      storeList = storeList.filter(s => set.has(s.storeId));
+    }
 
     // MonthFilter - col A
     const monthList = months.slice(1).map(r => (r[0] || '').trim()).filter(Boolean);
 
     res.json({ ok: true, areas, stores: storeList, months: monthList });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
   }
 });
 
 // Per Store Sales Performance endpoint
 app.get('/api/store-performance', async (req, res) => {
   try {
+    const scope = getUserScope(req);
     const { area } = req.query;
     // Multi-month support: accept comma-separated `months`, or fallback to `month` (single)
     const monthsRaw = (req.query.months || req.query.month || '').toString();
@@ -120,7 +245,8 @@ app.get('/api/store-performance', async (req, res) => {
       const sid = (cols[3] || '').trim();
       const m = (cols[0] || '').toString().trim();
       const ar = storeAreaMap[sid] || '';
-      if (area && ar.toLowerCase() !== area.toLowerCase()) return;
+      if (scope.areaSet  && !scope.areaSet.has(ar.toLowerCase())) return;
+      if (scope.storeSet && !scope.storeSet.has(sid)) return;
 
       if (passMonth(m)) {
         if (!salesByStore[sid]) salesByStore[sid] = { sC: 0, sY: 0, activeMonths: new Set() };
@@ -143,7 +269,8 @@ app.get('/api/store-performance', async (req, res) => {
       const m = (cols[0] || '').toString().trim();
       if (!sid || !m) return;
       const ar = storeAreaMap[sid] || '';
-      if (area && ar.toLowerCase() !== area.toLowerCase()) return;
+      if (scope.areaSet  && !scope.areaSet.has(ar.toLowerCase())) return;
+      if (scope.storeSet && !scope.storeSet.has(sid)) return;
       if (!passMonth(m)) return;
       if (!targetByStoreMonth[sid]) targetByStoreMonth[sid] = {};
       const key = m.toLowerCase();
@@ -153,7 +280,8 @@ app.get('/api/store-performance', async (req, res) => {
     // Build rows - target only counts months where current sales exist for that store
     const stores = storeRows.slice(1)
       .filter(r => r[3] && r[3].trim() !== '')
-      .filter(r => !area || (r[2] || '').toLowerCase() === area.toLowerCase());
+      .filter(r => !scope.areaSet  || scope.areaSet.has((r[2] || '').toLowerCase()))
+      .filter(r => !scope.storeSet || scope.storeSet.has((r[3] || '').trim()));
 
     const rows = stores.map(r => {
       const sid  = (r[3] || '').trim();
@@ -237,13 +365,14 @@ app.get('/api/store-performance', async (req, res) => {
       areaGrowth
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
   }
 });
 
 // Category Sales endpoint - reads CategorySales sheet
 app.get('/api/category-sales', async (req, res) => {
   try {
+    const scope = getUserScope(req);
     const { area, storeId } = req.query;
     const monthsRaw = (req.query.months || req.query.month || '').toString();
     const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
@@ -273,8 +402,8 @@ app.get('/api/category-sales', async (req, res) => {
 
     const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
     const passCat = (c) => !hasCatFilter || categorySet.has((c || '').toString().trim().toLowerCase());
-    const passArea = (ar) => !area || (ar || '').toString().trim().toLowerCase() === area.toLowerCase();
-    const passStore = (sid) => !storeId || sid === storeId;
+    const passArea = (ar) => !scope.areaSet || scope.areaSet.has((ar || '').toString().trim().toLowerCase());
+    const passStore = (sid) => !scope.storeSet || scope.storeSet.has(sid);
     // For breakdown tables only
     const passBdCat = (c) => !bdCategory || (c || '').toString().trim().toLowerCase() === bdCategory.toLowerCase();
     const passBdSubDept = (s) => !bdSubDept || (s || '').toString().trim().toLowerCase() === bdSubDept.toLowerCase();
@@ -414,13 +543,14 @@ app.get('/api/category-sales', async (req, res) => {
       )
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
   }
 });
 
 app.get('/api/data', async (req, res) => {
   const t0 = Date.now();
   try {
+    const scope = getUserScope(req);
     const { area, storeId } = req.query;
     // Multi-month: accept `months` (comma-separated) or single `month`
     const monthsRaw = (req.query.months || req.query.month || '').toString();
@@ -459,7 +589,8 @@ app.get('/api/data', async (req, res) => {
 
     // Helpers
     const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
-    const passArea  = (sid) => !area || (storeAreaMap[sid] || '').toLowerCase() === area.toLowerCase();
+    const passArea  = (sid) => !scope.areaSet || scope.areaSet.has((storeAreaMap[sid] || '').toLowerCase());
+    const passStoreScope = (sid) => !scope.storeSet || scope.storeSet.has(sid);
     const emptyMetric = () => ({ sC: 0, sY: 0, tC: 0, tY: 0 });
     const addInto = (target, src) => {
       target.sC += src.sC; target.sY += src.sY;
@@ -614,8 +745,8 @@ app.get('/api/data', async (req, res) => {
     function getStoreSet(storeIdFilter) {
       // Build list of store IDs that pass area/storeId filters
       if (storeIdFilter) return [storeIdFilter];
-      // All stores known (use storeAreaMap keys, optionally filtered by area)
-      return Object.keys(storeAreaMap).filter(sid => passArea(sid));
+      // All stores known (use storeAreaMap keys, filtered by area + user scope)
+      return Object.keys(storeAreaMap).filter(sid => passArea(sid) && passStoreScope(sid));
     }
 
     function aggIdx(idx, storeIds) {
@@ -694,7 +825,7 @@ app.get('/api/data', async (req, res) => {
 
   } catch (err) {
     console.error('Fetch error:', err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
   }
 });
 
@@ -751,6 +882,19 @@ const html = `<!DOCTYPE html>
     font-size: 12px; color: #C8E6C9; font-weight: 500;
     background: rgba(255,255,255,0.08); padding: 5px 12px; border-radius: 6px;
   }
+  .nav-right { display: flex; align-items: center; gap: 12px; }
+  .user-box { display: flex; align-items: center; gap: 8px; }
+  .user-name {
+    font-size: 11.5px; font-weight: 600; color: #FFC107;
+    padding: 5px 10px; background: rgba(255,193,7,0.15); border-radius: 6px;
+    letter-spacing: 0.3px;
+  }
+  .btn-logout {
+    background: transparent; color: #C8E6C9; border: 1px solid rgba(255,255,255,0.2);
+    padding: 5px 12px; border-radius: 6px; font-size: 11.5px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .btn-logout:hover { background: rgba(255,255,255,0.1); color: white; border-color: rgba(255,255,255,0.4); }
 
   /* TABS */
   .tabs {
@@ -1364,7 +1508,13 @@ const html = `<!DOCTYPE html>
 
 <div class="top-nav">
   <div class="brand">CAMANAVA eBRT <span>ELECTRONIC BUSINESS REVIEW TOOL</span></div>
-  <div class="date-label" id="currentDate"></div>
+  <div class="nav-right">
+    <div class="date-label" id="currentDate"></div>
+    <div class="user-box">
+      <span class="user-name" id="userName">…</span>
+      <button class="btn-logout" onclick="logout()">Logout</button>
+    </div>
+  </div>
 </div>
 
 <div class="tabs">
@@ -2944,11 +3094,131 @@ const html = `<!DOCTYPE html>
   }
   // ============ END CATEGORY SALES ============
 
+  // Logout
+  async function logout() {
+    try { await fetch('/api/logout', { method: 'POST' }); } catch (e) {}
+    window.location.href = '/login';
+  }
+  window.logout = logout;
+
+  // Fetch current user info and display name
+  (async () => {
+    try {
+      const r = await fetch('/api/me');
+      const d = await r.json();
+      if (d.ok && d.user) {
+        const u = d.user;
+        let label = u.username;
+        if (u.role === 'admin') label += ' · Admin';
+        else if (u.allowedStores && u.allowedStores.length) label += ' · ' + u.allowedStores.length + ' store(s)';
+        else if (u.allowedAreas && u.allowedAreas.length)   label += ' · ' + u.allowedAreas.join(', ');
+        document.getElementById('userName').textContent = label;
+      }
+    } catch (e) {}
+  })();
+
   // Auto-load on page open
   (async () => {
     await loadFilters();
     loadData();
   })();
+</script>
+</body>
+</html>`;
+
+const loginHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login · CAMANAVA eBRT</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', 'Segoe UI', sans-serif; background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 100%);
+         min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px;
+         -webkit-font-smoothing: antialiased; }
+  .login-card {
+    background: white; border-radius: 14px; padding: 36px 32px;
+    width: 100%; max-width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    border-top: 4px solid #FFC107;
+  }
+  .brand { text-align: center; margin-bottom: 26px; }
+  .brand-title { font-size: 20px; font-weight: 800; color: #1B5E20; letter-spacing: 0.5px; }
+  .brand-sub { font-size: 10.5px; color: #FFC107; letter-spacing: 1.5px; text-transform: uppercase;
+               font-weight: 700; margin-top: 4px; }
+  form { display: flex; flex-direction: column; gap: 14px; }
+  .field label {
+    display: block; font-size: 10.5px; font-weight: 700; color: #1B5E20;
+    text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 6px;
+  }
+  .field input {
+    width: 100%; padding: 10px 12px; border: 1px solid #d4dad4;
+    border-radius: 7px; font-size: 13px; color: #1a2e1f;
+    transition: border-color 0.15s;
+  }
+  .field input:focus { outline: none; border-color: #1B5E20; }
+  button {
+    margin-top: 6px; padding: 11px; border: none; border-radius: 7px;
+    background: #1B5E20; color: white; font-size: 13px; font-weight: 700;
+    letter-spacing: 0.5px; cursor: pointer; transition: background 0.15s;
+  }
+  button:hover { background: #2E7D32; }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .err {
+    background: #FFEBEE; border-left: 3px solid #C62828;
+    color: #C62828; padding: 9px 12px; font-size: 12px; border-radius: 6px;
+    display: none;
+  }
+  .err.show { display: block; }
+  .footer { text-align: center; font-size: 10px; color: #94a094; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <div class="brand">
+    <div class="brand-title">CAMANAVA eBRT</div>
+    <div class="brand-sub">Electronic Business Review Tool</div>
+  </div>
+  <form id="loginForm">
+    <div class="err" id="errBox"></div>
+    <div class="field">
+      <label>Username</label>
+      <input type="text" id="username" required autocomplete="username" autofocus />
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="password" required autocomplete="current-password" />
+    </div>
+    <button type="submit" id="submitBtn">Sign In</button>
+  </form>
+  <div class="footer">CAMANAVA Region · Authorized users only</div>
+</div>
+<script>
+  const form = document.getElementById('loginForm');
+  const errBox = document.getElementById('errBox');
+  const btn = document.getElementById('submitBtn');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errBox.classList.remove('show');
+    btn.disabled = true; btn.textContent = 'Signing in...';
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('username').value,
+          password: document.getElementById('password').value
+        })
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Login failed');
+      window.location.href = '/';
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.classList.add('show');
+      btn.disabled = false; btn.textContent = 'Sign In';
+    }
+  });
 </script>
 </body>
 </html>`;
