@@ -547,6 +547,160 @@ app.get('/api/category-sales', async (req, res) => {
   }
 });
 
+// Shopper Metrics endpoint - reads ShopperMetricsData sheet
+app.get('/api/shopper-metrics', async (req, res) => {
+  try {
+    const scope = getUserScope(req);
+    const monthsRaw = (req.query.months || '').toString();
+    const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const monthSet = new Set(monthArr.map(m => m.toLowerCase()));
+    const hasMonthFilter = monthSet.size > 0;
+
+    const typesRaw = (req.query.types || '').toString();
+    const typeArr = typesRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const typeSet = new Set(typeArr.map(t => t.toLowerCase()));
+    const hasTypeFilter = typeSet.size > 0;
+
+    const [rows, storeRows] = await Promise.all([
+      fetchSheet('ShopperMetricsData'),
+      fetchSheet('ListOfStores')
+    ]);
+
+    // Store lookup
+    const storeNameMap = {};
+    const storeAreaMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      if (sid) {
+        storeNameMap[sid] = (r[4] || '').trim();
+        storeAreaMap[sid] = (r[2] || '').trim();
+      }
+    });
+
+    // Column detection by header name (handles dots, spaces, case)
+    const normalize = s => (s || '').toString().trim().toUpperCase().replace(/[\s._-]/g, '');
+    const headers = (rows[0] || []).map(normalize);
+    const colOf = (...names) => {
+      for (const n of names) {
+        const i = headers.indexOf(normalize(n));
+        if (i >= 0) return i;
+      }
+      return -1;
+    };
+    const C = {
+      TYPE:       colOf('TYPE'),
+      AREA:       colOf('Area'),
+      MONTH:      colOf('Month'),
+      STOREID:    colOf('STOREID', 'STORE ID', 'STORECODE', 'STORE CODE'),
+      STORENAME:  colOf('STORENAME', 'STORE NAME'),
+      SALES:      colOf('Sales'),
+      SALESLY:    colOf('SalesLY'),
+      BMEMBER:    colOf('B.Member', 'BMember'),
+      BMEMBERLY:  colOf('B.MemberLY', 'BMemberLY'),
+      TRX:        colOf('TRXCount'),
+      TRXLY:      colOf('TRXCountLY'),
+      SIGNUP:     colOf('Sign-Up', 'SignUp'),
+      SIGNUPLY:   colOf('Sign-UpLY', 'SignUpLY')
+    };
+
+    const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
+    const passType  = (t) => !hasTypeFilter  || typeSet.has((t || '').toString().trim().toLowerCase());
+    const passArea  = (ar) => !scope.areaSet  || scope.areaSet.has((ar || '').toString().trim().toLowerCase());
+    const passStore = (sid) => !scope.storeSet || scope.storeSet.has(sid);
+
+    const emptyMetric = () => ({ sales: 0, salesLY: 0, bmember: 0, bmemberLY: 0, trx: 0, trxLY: 0, signup: 0, signupLY: 0 });
+    const addMetric = (target, cols) => {
+      if (C.SALES     >= 0) target.sales     += num(cols[C.SALES]);
+      if (C.SALESLY   >= 0) target.salesLY   += num(cols[C.SALESLY]);
+      if (C.BMEMBER   >= 0) target.bmember   += num(cols[C.BMEMBER]);
+      if (C.BMEMBERLY >= 0) target.bmemberLY += num(cols[C.BMEMBERLY]);
+      if (C.TRX       >= 0) target.trx       += num(cols[C.TRX]);
+      if (C.TRXLY     >= 0) target.trxLY     += num(cols[C.TRXLY]);
+      if (C.SIGNUP    >= 0) target.signup    += num(cols[C.SIGNUP]);
+      if (C.SIGNUPLY  >= 0) target.signupLY  += num(cols[C.SIGNUPLY]);
+    };
+
+    const byType  = {};
+    const byArea  = {};
+    const byStore = {};
+    const total = emptyMetric();
+    const allTypeSet = new Set();
+
+    rows.slice(1).forEach(cols => {
+      const t   = C.TYPE      >= 0 ? (cols[C.TYPE]      || '').toString().trim() : '';
+      const ar  = C.AREA      >= 0 ? (cols[C.AREA]      || '').toString().trim() : '';
+      const m   = C.MONTH     >= 0 ? (cols[C.MONTH]     || '').toString().trim() : '';
+      const sid = C.STOREID   >= 0 ? (cols[C.STOREID]   || '').toString().trim() : '';
+
+      if (t) allTypeSet.add(t);
+
+      // Apply month, area, store filters
+      if (!passMonth(m)) return;
+      if (!passArea(ar)) return;
+      if (!passStore(sid)) return;
+
+      // byType - ignores type filter (so user always sees all 4 types)
+      if (t) {
+        if (!byType[t]) byType[t] = emptyMetric();
+        addMetric(byType[t], cols);
+      }
+
+      // Other aggregations honor type filter
+      if (!passType(t)) return;
+
+      addMetric(total, cols);
+
+      if (ar) {
+        if (!byArea[ar]) byArea[ar] = emptyMetric();
+        addMetric(byArea[ar], cols);
+      }
+      if (sid) {
+        if (!byStore[sid]) {
+          const nameFromRow = C.STORENAME >= 0 ? (cols[C.STORENAME] || '').toString().trim() : '';
+          byStore[sid] = {
+            storeName: nameFromRow || storeNameMap[sid] || sid,
+            area: ar || storeAreaMap[sid] || '',
+            ...emptyMetric()
+          };
+        }
+        addMetric(byStore[sid], cols);
+      }
+    });
+
+    const diff = (cur, ly) => {
+      const amt = cur - ly;
+      const pct = ly !== 0 ? (amt / Math.abs(ly)) * 100 : null;
+      return { amt, pct };
+    };
+    const enrich = (m) => ({
+      ...m,
+      salesDiff:    diff(m.sales, m.salesLY),
+      bmemberDiff:  diff(m.bmember, m.bmemberLY),
+      trxDiff:      diff(m.trx, m.trxLY),
+      signupDiff:   diff(m.signup, m.signupLY)
+    });
+
+    const typesData  = Object.entries(byType).map(([type, m]) => ({ type, ...enrich(m) })).sort((a, b) => b.sales - a.sales);
+    const areasData  = Object.entries(byArea).map(([area, m]) => ({ area, ...enrich(m) })).sort((a, b) => b.sales - a.sales);
+    const storesData = Object.entries(byStore).map(([sid, m]) => ({
+      storeId: sid, storeName: m.storeName, area: m.area, ...enrich(m)
+    })).sort((a, b) => b.sales - a.sales);
+
+    res.json({
+      ok: true,
+      filters: { months: monthArr, types: typeArr, area: req.query.area || null, storeId: req.query.storeId || null },
+      summary: enrich(total),
+      types: typesData,
+      areas: areasData,
+      stores: storesData,
+      allTypes: [...allTypeSet].sort(),
+      columnsFound: Object.fromEntries(Object.entries(C).map(([k, v]) => [k, v >= 0]))
+    });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/data', async (req, res) => {
   const t0 = Date.now();
   try {
@@ -1377,8 +1531,15 @@ const html = `<!DOCTYPE html>
 
   /* ===== CATEGORY SALES TAB ===== */
   .kpi-grid-5 { grid-template-columns: repeat(5, 1fr); }
-  @media (max-width: 1100px) { .kpi-grid-5 { grid-template-columns: repeat(3, 1fr); } }
-  @media (max-width: 600px)  { .kpi-grid-5 { grid-template-columns: repeat(2, 1fr); } }
+  .kpi-grid-6 { grid-template-columns: repeat(6, 1fr); }
+  @media (max-width: 1100px) {
+    .kpi-grid-5 { grid-template-columns: repeat(3, 1fr); }
+    .kpi-grid-6 { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 600px)  {
+    .kpi-grid-5 { grid-template-columns: repeat(2, 1fr); }
+    .kpi-grid-6 { grid-template-columns: repeat(2, 1fr); }
+  }
 
   .cs-charts-row {
     display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px;
@@ -1521,6 +1682,7 @@ const html = `<!DOCTYPE html>
   <button class="tab-btn active" onclick="switchTab(this, 'daily')">One Page BRT</button>
   <button class="tab-btn" onclick="switchTab(this, 'monthly')">Per Store Sales Performance</button>
   <button class="tab-btn" onclick="switchTab(this, 'category')">Category Sales</button>
+  <button class="tab-btn" onclick="switchTab(this, 'shopper')">Shopper Metrics</button>
 </div>
 
 <!-- DAILY TAB -->
@@ -1796,6 +1958,107 @@ const html = `<!DOCTYPE html>
         <tbody id="csStoreBody"></tbody>
       </table>
     </div>
+  </div>
+
+</div>
+
+<!-- SHOPPER METRICS TAB -->
+<div id="tab-shopper" class="content" style="display:none;">
+
+  <div class="filter-bar">
+    <label>Type</label>
+    <div class="multi-select" id="smMsType">
+      <button type="button" class="ms-btn" onclick="toggleMs('smMsType')">All Types ▾</button>
+      <div class="ms-panel" id="smMsTypePanel"></div>
+    </div>
+    <label>Month</label>
+    <div class="multi-select" id="smMsMonth">
+      <button type="button" class="ms-btn" onclick="toggleMs('smMsMonth')">All Months ▾</button>
+      <div class="ms-panel" id="smMsMonthPanel"></div>
+    </div>
+    <label>Area</label>
+    <select id="smAreaFilter"><option value="">All Areas</option></select>
+    <label>Store</label>
+    <select id="smStoreFilter"><option value="">All Stores</option></select>
+    <button class="btn-refresh" id="smRefreshBtn" onclick="loadShopperMetrics()">↻ Refresh</button>
+  </div>
+
+  <div id="smStatusBar" class="status-bar loading">
+    <span class="spinner"></span> Loading shopper metrics...
+  </div>
+
+  <!-- KPI Cards (6) -->
+  <div class="kpi-grid kpi-grid-6" id="smKpiGrid"></div>
+
+  <!-- Breakdown by Type chart -->
+  <div class="chart-card" style="margin-top:14px;">
+    <div class="chart-title">Sales vs Sales LY · Breakdown by Type</div>
+    <div class="chart-wrap"><canvas id="smChartType"></canvas></div>
+  </div>
+
+  <!-- Per Area Section -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Per Area Performance</div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="smAreaTable">
+        <thead><tr>
+          <th class="sortable" data-col="area">Area</th>
+          <th class="sortable" data-col="sales">Sales</th>
+          <th class="sortable" data-col="salesLY">Sales LY</th>
+          <th class="sortable" data-col="salesDiffPct">Sales Diff %</th>
+          <th class="sortable" data-col="salesDiffAmt">Sales Diff Val</th>
+          <th class="sortable" data-col="bmember">B.Member</th>
+          <th class="sortable" data-col="bmemberLY">B.Member LY</th>
+          <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
+          <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
+        </tr></thead>
+        <tbody id="smAreaBody"></tbody>
+        <tfoot id="smAreaFoot"></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <div class="cs-charts-row" style="margin-top:8px;">
+    <div class="chart-card">
+      <div class="chart-title">Sales vs Sales LY per Area</div>
+      <div class="chart-wrap"><canvas id="smChartAreaSales"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">B.Member vs B.Member LY per Area</div>
+      <div class="chart-wrap"><canvas id="smChartAreaBM"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Per Store Section -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Per Store Performance</div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="smStoreTable">
+        <thead><tr>
+          <th class="sortable" data-col="storeId">Store ID</th>
+          <th class="sortable" data-col="storeName">Store Name</th>
+          <th class="sortable" data-col="area">Area</th>
+          <th class="sortable" data-col="sales">Sales</th>
+          <th class="sortable" data-col="salesLY">Sales LY</th>
+          <th class="sortable" data-col="salesDiffPct">Sales Diff %</th>
+          <th class="sortable" data-col="salesDiffAmt">Sales Diff Val</th>
+          <th class="sortable" data-col="bmember">B.Member</th>
+          <th class="sortable" data-col="bmemberLY">B.Member LY</th>
+          <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
+          <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
+        </tr></thead>
+        <tbody id="smStoreBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="chart-card" style="margin-top:8px;">
+    <div class="chart-title">Sales vs Sales LY per Store</div>
+    <div class="chart-wrap chart-wrap-tall"><canvas id="smChartStoreSales"></canvas></div>
+  </div>
+  <div class="chart-card" style="margin-top:8px;">
+    <div class="chart-title">B.Member vs B.Member LY per Store</div>
+    <div class="chart-wrap chart-wrap-tall"><canvas id="smChartStoreBM"></canvas></div>
   </div>
 
 </div>
@@ -2242,6 +2505,7 @@ const html = `<!DOCTYPE html>
     const onChange = id === 'msMonth' ? loadData
                    : id === 'psMsMonth' ? loadStorePerf
                    : (id === 'csMsMonth' || id === 'csMsCategory') ? loadCategorySales
+                   : (id === 'smMsMonth' || id === 'smMsType') ? loadShopperMetrics
                    : null;
     const actions = \`
       <div class="ms-actions">
@@ -2658,6 +2922,7 @@ const html = `<!DOCTYPE html>
   // Trigger load when user opens this tab for the first time
   let psFirstLoad = false;
   let csFirstLoad = false;
+  let smFirstLoad = false;
   const _origSwitch = window.switchTab || switchTab;
   window.switchTab = function(btn, tabId) {
     _origSwitch(btn, tabId);
@@ -2668,6 +2933,10 @@ const html = `<!DOCTYPE html>
     if (tabId === 'category' && !csFirstLoad) {
       csFirstLoad = true;
       loadCsFilters().then(() => loadCategorySales());
+    }
+    if (tabId === 'shopper' && !smFirstLoad) {
+      smFirstLoad = true;
+      loadSmFilters().then(() => loadShopperMetrics());
     }
   };
 
@@ -3093,6 +3362,402 @@ const html = `<!DOCTYPE html>
     });
   }
   // ============ END CATEGORY SALES ============
+
+  // ============ SHOPPER METRICS ============
+  let smFiltersLoaded = false;
+  let smCharts = { type: null, areaSales: null, areaBM: null, storeSales: null, storeBM: null };
+  let smCurrentData = null;
+  let smSorts = {
+    area:  { col: 'sales', asc: false },
+    store: { col: 'sales', asc: false }
+  };
+
+  function smFmt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    if (Math.abs(n) >= 1000000) return Math.round(n).toLocaleString('en-PH');
+    return n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function smFmtInt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return Math.round(n).toLocaleString('en-PH');
+  }
+  function smFmtPct(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+  }
+  function smFmtSigned(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + smFmt(n);
+  }
+  function smFmtSignedInt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + Math.round(n).toLocaleString('en-PH');
+  }
+  function smFmtMoneyCompact(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    const abs = Math.abs(n);
+    const sign = n < 0 ? '-' : '';
+    if (abs >= 1e9) return sign + '₱' + (abs/1e9).toFixed(2) + 'B';
+    if (abs >= 1e6) return sign + '₱' + (abs/1e6).toFixed(2) + 'M';
+    if (abs >= 1e3) return sign + '₱' + (abs/1e3).toFixed(1) + 'K';
+    return sign + '₱' + abs.toFixed(0);
+  }
+  function smFmtCountCompact(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    const abs = Math.abs(n);
+    const sign = n < 0 ? '-' : '';
+    if (abs >= 1e6) return sign + (abs/1e6).toFixed(2) + 'M';
+    if (abs >= 1e3) return sign + (abs/1e3).toFixed(1) + 'K';
+    return sign + Math.round(abs).toLocaleString('en-PH');
+  }
+
+  async function loadSmFilters() {
+    if (smFiltersLoaded) return;
+    try {
+      const res = await fetch('/api/filters');
+      const f = await res.json();
+      if (!f.ok) return;
+      buildMsPanel('smMsMonth', f.months, 'All Months');
+      const areaSel = document.getElementById('smAreaFilter');
+      f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+      const storeSel = document.getElementById('smStoreFilter');
+      f.stores.forEach(s => storeSel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} - \${s.name}</option>\`);
+      areaSel.addEventListener('change', loadShopperMetrics);
+      storeSel.addEventListener('change', loadShopperMetrics);
+      smFiltersLoaded = true;
+    } catch (e) { console.error('sm filter load failed', e); }
+  }
+
+  async function loadShopperMetrics() {
+    const btn = document.getElementById('smRefreshBtn');
+    const status = document.getElementById('smStatusBar');
+    btn.classList.add('loading');
+    btn.textContent = '⏳ Loading...';
+    status.className = 'status-bar loading';
+    status.innerHTML = '<span class="spinner"></span> Loading shopper metrics...';
+
+    try {
+      const months = getMsValues('smMsMonth');
+      const types  = getMsValues('smMsType');
+      const areaV  = document.getElementById('smAreaFilter').value;
+      const storeV = document.getElementById('smStoreFilter').value;
+      const params = new URLSearchParams();
+      if (months.length) params.set('months', months.join(','));
+      if (types.length)  params.set('types', types.join(','));
+      if (areaV)         params.set('area', areaV);
+      if (storeV)        params.set('storeId', storeV);
+
+      const res = await fetch('/api/shopper-metrics?' + params.toString());
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+
+      smCurrentData = data;
+
+      // Populate Type multi-select on first load
+      if (data.allTypes && data.allTypes.length && !document.querySelector('#smMsTypePanel input')) {
+        buildMsPanel('smMsType', data.allTypes, 'All Types');
+      }
+
+      renderSmKpis(data);
+      renderSmTypeChart(data);
+      renderSmAreaTable();
+      renderSmStoreTable();
+      renderSmAreaCharts(data);
+      renderSmStoreCharts(data);
+
+      status.className = 'status-bar';
+      const parts = [];
+      if (months.length) parts.push(months.length <= 3 ? 'Months: ' + months.join(', ') : 'Months: ' + months.length + ' selected');
+      if (types.length)  parts.push('Types: ' + types.join(', '));
+      if (areaV)  parts.push('Area: ' + areaV);
+      if (storeV) parts.push('Store: ' + storeV);
+      const ftxt = parts.join(' · ') || 'No filters';
+      status.innerHTML = \`✅ \${ftxt} · \${data.areas.length} areas · \${data.stores.length} stores · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+    } catch (err) {
+      status.className = 'status-bar error';
+      status.innerHTML = '❌ Error: ' + err.message;
+    } finally {
+      btn.classList.remove('loading');
+      btn.textContent = '↻ Refresh';
+    }
+  }
+
+  function renderSmKpis(data) {
+    const s = data.summary;
+    const salesPerMember = s.bmember > 0 ? s.sales / s.bmember : 0;
+    const salesPerMemberLY = s.bmemberLY > 0 ? s.salesLY / s.bmemberLY : 0;
+    const spmDiff = salesPerMemberLY !== 0 ? ((salesPerMember - salesPerMemberLY) / salesPerMemberLY) * 100 : null;
+    const netNewMembers = s.bmember - s.bmemberLY;
+
+    const cards = [
+      { label: 'Sales',         value: smFmtMoneyCompact(s.sales),     diff: smFmtPct(s.salesDiff.pct),    cls: s.salesDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',    sub: 'vs ' + smFmtMoneyCompact(s.salesLY) + ' LY' },
+      { label: 'B.Member',      value: smFmtCountCompact(s.bmember),    diff: smFmtPct(s.bmemberDiff.pct),  cls: s.bmemberDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',  sub: 'vs ' + smFmtCountCompact(s.bmemberLY) + ' LY' },
+      { label: 'TRX Count',     value: smFmtCountCompact(s.trx),        diff: smFmtPct(s.trxDiff.pct),      cls: s.trxDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'vs ' + smFmtCountCompact(s.trxLY) + ' LY' },
+      { label: 'Sign-Up',       value: smFmtCountCompact(s.signup),     diff: smFmtPct(s.signupDiff.pct),   cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',   sub: 'vs ' + smFmtCountCompact(s.signupLY) + ' LY' },
+      { label: 'Sales / Member',value: smFmtMoneyCompact(salesPerMember), diff: smFmtPct(spmDiff),          cls: (spmDiff || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',     sub: 'avg per buying member' },
+      { label: 'Net New Members', value: smFmtSignedInt(netNewMembers), diff: null,                         cls: netNewMembers >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'B.Member − B.Member LY' }
+    ];
+    document.getElementById('smKpiGrid').innerHTML = cards.map(c => \`
+      <div class="kpi-card \${c.cls}">
+        <div class="kpi-label">\${c.label}</div>
+        <div class="kpi-value">\${c.value}</div>
+        <div class="kpi-sub">\${c.diff ? '<b>' + c.diff + '</b> · ' : ''}\${c.sub}</div>
+      </div>\`).join('');
+  }
+
+  function smSort(rows, key, asc) {
+    return rows.slice().sort((a, b) => {
+      let va, vb;
+      if (key === 'salesDiffPct')    { va = a.salesDiff.pct;   vb = b.salesDiff.pct; }
+      else if (key === 'salesDiffAmt')   { va = a.salesDiff.amt;   vb = b.salesDiff.amt; }
+      else if (key === 'bmemberDiffPct') { va = a.bmemberDiff.pct; vb = b.bmemberDiff.pct; }
+      else if (key === 'bmemberDiffAmt') { va = a.bmemberDiff.amt; vb = b.bmemberDiff.amt; }
+      else { va = a[key]; vb = b[key]; }
+      if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      if (va === null || isNaN(va)) va = asc ? Infinity : -Infinity;
+      if (vb === null || isNaN(vb)) vb = asc ? Infinity : -Infinity;
+      return asc ? va - vb : vb - va;
+    });
+  }
+  function smUpdateSortInd(tableId, sortState) {
+    document.querySelectorAll('#' + tableId + ' thead th.sortable').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.col === sortState.col) th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  function renderSmAreaTable() {
+    if (!smCurrentData) return;
+    const rows = smSort(smCurrentData.areas, smSorts.area.col, smSorts.area.asc);
+    smUpdateSortInd('smAreaTable', smSorts.area);
+    document.getElementById('smAreaBody').innerHTML = rows.map(r => {
+      const sdCls = r.salesDiff.pct === null ? '' : (r.salesDiff.pct >= 0 ? 'pos' : 'neg');
+      const sdaCls = r.salesDiff.amt >= 0 ? 'pos' : 'neg';
+      const bdCls = r.bmemberDiff.pct === null ? '' : (r.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
+      const bdaCls = r.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area}</span></td>
+        <td>\${smFmt(r.sales)}</td>
+        <td>\${smFmt(r.salesLY)}</td>
+        <td class="\${sdCls}">\${r.salesDiff.pct === null ? '—' : smFmtPct(r.salesDiff.pct)}</td>
+        <td class="\${sdaCls}">\${smFmtSigned(r.salesDiff.amt)}</td>
+        <td>\${smFmtInt(r.bmember)}</td>
+        <td>\${smFmtInt(r.bmemberLY)}</td>
+        <td class="\${bdCls}">\${r.bmemberDiff.pct === null ? '—' : smFmtPct(r.bmemberDiff.pct)}</td>
+        <td class="\${bdaCls}">\${smFmtSignedInt(r.bmemberDiff.amt)}</td>
+      </tr>\`;
+    }).join('');
+
+    const t = smCurrentData.summary;
+    const sdCls  = t.salesDiff.pct === null ? '' : (t.salesDiff.pct >= 0 ? 'pos' : 'neg');
+    const sdaCls = t.salesDiff.amt >= 0 ? 'pos' : 'neg';
+    const bdCls  = t.bmemberDiff.pct === null ? '' : (t.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
+    const bdaCls = t.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+    document.getElementById('smAreaFoot').innerHTML = \`<tr>
+      <td class="text-col">TOTAL · \${smCurrentData.areas.length} AREAS</td>
+      <td>\${smFmt(t.sales)}</td>
+      <td>\${smFmt(t.salesLY)}</td>
+      <td class="\${sdCls}">\${t.salesDiff.pct === null ? '—' : smFmtPct(t.salesDiff.pct)}</td>
+      <td class="\${sdaCls}">\${smFmtSigned(t.salesDiff.amt)}</td>
+      <td>\${smFmtInt(t.bmember)}</td>
+      <td>\${smFmtInt(t.bmemberLY)}</td>
+      <td class="\${bdCls}">\${t.bmemberDiff.pct === null ? '—' : smFmtPct(t.bmemberDiff.pct)}</td>
+      <td class="\${bdaCls}">\${smFmtSignedInt(t.bmemberDiff.amt)}</td>
+    </tr>\`;
+  }
+
+  function renderSmStoreTable() {
+    if (!smCurrentData) return;
+    const rows = smSort(smCurrentData.stores, smSorts.store.col, smSorts.store.asc);
+    smUpdateSortInd('smStoreTable', smSorts.store);
+    document.getElementById('smStoreBody').innerHTML = rows.map(r => {
+      const sdCls = r.salesDiff.pct === null ? '' : (r.salesDiff.pct >= 0 ? 'pos' : 'neg');
+      const sdaCls = r.salesDiff.amt >= 0 ? 'pos' : 'neg';
+      const bdCls = r.bmemberDiff.pct === null ? '' : (r.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
+      const bdaCls = r.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col">#\${r.storeId}</td>
+        <td class="text-col">\${r.storeName}</td>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area || '—'}</span></td>
+        <td>\${smFmt(r.sales)}</td>
+        <td>\${smFmt(r.salesLY)}</td>
+        <td class="\${sdCls}">\${r.salesDiff.pct === null ? '—' : smFmtPct(r.salesDiff.pct)}</td>
+        <td class="\${sdaCls}">\${smFmtSigned(r.salesDiff.amt)}</td>
+        <td>\${smFmtInt(r.bmember)}</td>
+        <td>\${smFmtInt(r.bmemberLY)}</td>
+        <td class="\${bdCls}">\${r.bmemberDiff.pct === null ? '—' : smFmtPct(r.bmemberDiff.pct)}</td>
+        <td class="\${bdaCls}">\${smFmtSignedInt(r.bmemberDiff.amt)}</td>
+      </tr>\`;
+    }).join('');
+  }
+
+  // Sort click handler for sm tables
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('#smAreaTable thead th.sortable, #smStoreTable thead th.sortable');
+    if (!th || !smCurrentData) return;
+    const tableId = th.closest('table').id;
+    const col = th.dataset.col;
+    const k = tableId === 'smAreaTable' ? 'area' : 'store';
+    if (smSorts[k].col === col) smSorts[k].asc = !smSorts[k].asc;
+    else { smSorts[k].col = col; smSorts[k].asc = false; }
+    if (k === 'area') renderSmAreaTable();
+    else renderSmStoreTable();
+  });
+
+  function renderSmTypeChart(data) {
+    if (smCharts.type) smCharts.type.destroy();
+    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
+      Chart.register(window.ChartDataLabels);
+      Chart._datalabelsRegistered = true;
+    }
+    const GREEN = '#1B5E20', YELLOW = '#FFC107';
+    const compactMoney = v => {
+      const abs = Math.abs(v);
+      if (abs >= 1e9) return '₱' + (v/1e9).toFixed(1) + 'B';
+      if (abs >= 1e6) return '₱' + (v/1e6).toFixed(1) + 'M';
+      if (abs >= 1e3) return '₱' + (v/1e3).toFixed(0) + 'K';
+      return '₱' + Math.round(v);
+    };
+    smCharts.type = new Chart(document.getElementById('smChartType'), {
+      type: 'bar',
+      data: {
+        labels: data.types.map(t => t.type),
+        datasets: [
+          { label: 'Sales',    data: data.types.map(t => t.sales),   backgroundColor: '#66BB6A', borderColor: GREEN, borderWidth: 1.5 },
+          { label: 'Sales LY', data: data.types.map(t => t.salesLY), backgroundColor: '#FFD54F', borderColor: YELLOW, borderWidth: 1.5 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'top', labels: { font: { size: 11 }, color: '#444' } },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2,
+            color: ctx => ctx.datasetIndex === 0 ? GREEN : '#F57F17',
+            font: { size: 10, weight: 700 },
+            formatter: v => compactMoney(v)
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 11, weight: 600 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactMoney(v) }, grid: { color: '#eee' } }
+        }
+      }
+    });
+  }
+
+  function smPairedBarChart(canvasId, labels, curData, lyData, curLabel, lyLabel, isMoney) {
+    const GREEN = '#1B5E20', YELLOW = '#FFC107';
+    const compact = v => {
+      const abs = Math.abs(v);
+      const prefix = isMoney ? '₱' : '';
+      if (abs >= 1e9) return prefix + (v/1e9).toFixed(1) + 'B';
+      if (abs >= 1e6) return prefix + (v/1e6).toFixed(1) + 'M';
+      if (abs >= 1e3) return prefix + (v/1e3).toFixed(0) + 'K';
+      return prefix + Math.round(v);
+    };
+    return new Chart(document.getElementById(canvasId), {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: curLabel, data: curData, backgroundColor: '#66BB6A', borderColor: GREEN, borderWidth: 1.5 },
+          { label: lyLabel,  data: lyData,  backgroundColor: '#FFD54F', borderColor: YELLOW, borderWidth: 1.5 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'top', labels: { font: { size: 10 }, color: '#444' } },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2,
+            color: ctx => ctx.datasetIndex === 0 ? GREEN : '#F57F17',
+            font: { size: 9, weight: 700 },
+            formatter: v => compact(v)
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 9 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compact(v) }, grid: { color: '#eee' } }
+        }
+      }
+    });
+  }
+
+  function smPairedHorizBarChart(canvasId, labels, curData, lyData, curLabel, lyLabel, isMoney) {
+    const GREEN = '#1B5E20', YELLOW = '#FFC107';
+    const compact = v => {
+      const abs = Math.abs(v);
+      const prefix = isMoney ? '₱' : '';
+      if (abs >= 1e9) return prefix + (v/1e9).toFixed(1) + 'B';
+      if (abs >= 1e6) return prefix + (v/1e6).toFixed(1) + 'M';
+      if (abs >= 1e3) return prefix + (v/1e3).toFixed(0) + 'K';
+      return prefix + Math.round(v);
+    };
+    return new Chart(document.getElementById(canvasId), {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: curLabel, data: curData, backgroundColor: '#66BB6A', borderColor: GREEN, borderWidth: 1.5 },
+          { label: lyLabel,  data: lyData,  backgroundColor: '#FFD54F', borderColor: YELLOW, borderWidth: 1.5 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        indexAxis: 'y',
+        plugins: {
+          legend: { position: 'top', labels: { font: { size: 10 }, color: '#444' } },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2,
+            color: ctx => ctx.datasetIndex === 0 ? GREEN : '#F57F17',
+            font: { size: 9, weight: 700 },
+            formatter: v => compact(v)
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => compact(v) }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  function renderSmAreaCharts(data) {
+    if (smCharts.areaSales) smCharts.areaSales.destroy();
+    if (smCharts.areaBM)    smCharts.areaBM.destroy();
+    const labels = data.areas.map(a => a.area);
+    smCharts.areaSales = smPairedBarChart('smChartAreaSales',
+      labels,
+      data.areas.map(a => a.sales),
+      data.areas.map(a => a.salesLY),
+      'Sales', 'Sales LY', true);
+    smCharts.areaBM = smPairedBarChart('smChartAreaBM',
+      labels,
+      data.areas.map(a => a.bmember),
+      data.areas.map(a => a.bmemberLY),
+      'B.Member', 'B.Member LY', false);
+  }
+
+  function renderSmStoreCharts(data) {
+    if (smCharts.storeSales) smCharts.storeSales.destroy();
+    if (smCharts.storeBM)    smCharts.storeBM.destroy();
+    // Dynamic height for tall horizontal charts
+    const tallHeight = Math.max(340, data.stores.length * 28 + 80);
+    document.querySelectorAll('#tab-shopper .chart-wrap-tall').forEach(el => el.style.height = tallHeight + 'px');
+    const labels = data.stores.map(s => s.storeName);
+    smCharts.storeSales = smPairedHorizBarChart('smChartStoreSales',
+      labels,
+      data.stores.map(s => s.sales),
+      data.stores.map(s => s.salesLY),
+      'Sales', 'Sales LY', true);
+    smCharts.storeBM = smPairedHorizBarChart('smChartStoreBM',
+      labels,
+      data.stores.map(s => s.bmember),
+      data.stores.map(s => s.bmemberLY),
+      'B.Member', 'B.Member LY', false);
+  }
+  // ============ END SHOPPER METRICS ============
 
   // Logout
   async function logout() {
