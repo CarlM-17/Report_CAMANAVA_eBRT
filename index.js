@@ -561,9 +561,11 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const typeSet = new Set(typeArr.map(t => t.toLowerCase()));
     const hasTypeFilter = typeSet.size > 0;
 
-    const [rows, storeRows] = await Promise.all([
+    const [rows, storeRows, storeTargetRows, areaTargetRows] = await Promise.all([
       fetchSheet('ShopperMetricsData'),
-      fetchSheet('ListOfStores')
+      fetchSheet('ListOfStores'),
+      fetchSheet('ShopperMetricsTarget'),
+      fetchSheet('AreaShopperTarget')
     ]);
 
     // Store lookup
@@ -602,6 +604,56 @@ app.get('/api/shopper-metrics', async (req, res) => {
       SIGNUP:     colOf('Sign-Up', 'SignUp'),
       SIGNUPLY:   colOf('Sign-UpLY', 'SignUpLY')
     };
+
+    // ===== Parse target sheets =====
+    // Reusable column finder
+    function buildTCol(sheetRows) {
+      const h = (sheetRows[0] || []).map(normalize);
+      return (...names) => {
+        for (const n of names) {
+          const i = h.indexOf(normalize(n));
+          if (i >= 0) return i;
+        }
+        return -1;
+      };
+    }
+
+    // Store-level targets from ShopperMetricsTarget
+    const ST = (() => {
+      const tc = buildTCol(storeTargetRows);
+      return { AREA: tc('Area'), TYPE: tc('TYPE'), STOREID: tc('Store ID', 'STOREID'),
+               CATEGORY: tc('Category'), TARGET: tc('Target') };
+    })();
+    const targetByStore = {};
+    storeTargetRows.slice(1).forEach(cols => {
+      if (!cols) return;
+      const ty  = ST.TYPE     >= 0 ? (cols[ST.TYPE]     || '').toString().trim().toUpperCase() : '';
+      const sid = ST.STOREID  >= 0 ? (cols[ST.STOREID]  || '').toString().trim() : '';
+      const cat = ST.CATEGORY >= 0 ? (cols[ST.CATEGORY] || '').toString().trim() : '';
+      const tgt = ST.TARGET   >= 0 ? num(cols[ST.TARGET]) : 0;
+      if (!ty || !sid) return;
+      if (ST.CATEGORY >= 0 && cat && cat.toLowerCase() !== 'buying member') return;
+      const k = sid + '|' + ty;
+      targetByStore[k] = (targetByStore[k] || 0) + tgt;
+    });
+
+    // Area-level targets from AreaShopperTarget
+    const AT = (() => {
+      const tc = buildTCol(areaTargetRows);
+      return { AREA: tc('Area'), TYPE: tc('TYPE'), TARGET: tc('Target') };
+    })();
+    const targetByArea = {};
+    areaTargetRows.slice(1).forEach(cols => {
+      if (!cols) return;
+      const ar = AT.AREA   >= 0 ? (cols[AT.AREA]   || '').toString().trim() : '';
+      const ty = AT.TYPE   >= 0 ? (cols[AT.TYPE]   || '').toString().trim().toUpperCase() : '';
+      const tgt = AT.TARGET >= 0 ? num(cols[AT.TARGET]) : 0;
+      if (!ar || !ty) return;
+      const k = ar.toLowerCase() + '|' + ty;
+      targetByArea[k] = (targetByArea[k] || 0) + tgt;
+    });
+
+    const selectedType = (typeArr[0] || '').toUpperCase();
 
     const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
     const passType  = (t) => !hasTypeFilter  || typeSet.has((t || '').toString().trim().toLowerCase());
@@ -718,15 +770,28 @@ app.get('/api/shopper-metrics', async (req, res) => {
     });
 
     const typesData  = Object.entries(byType).map(([type, m]) => ({ type, ...enrich(m) })).sort((a, b) => b.sales - a.sales);
-    const areasData  = Object.entries(byArea).map(([area, m]) => ({ area, ...enrich(m) })).sort((a, b) => b.sales - a.sales);
-    const storesData = Object.entries(byStore).map(([sid, m]) => ({
-      storeId: sid, storeName: m.storeName, area: m.area, ...enrich(m)
-    })).sort((a, b) => b.sales - a.sales);
+    const areasData  = Object.entries(byArea).map(([area, m]) => {
+      const tgt = selectedType ? (targetByArea[area.toLowerCase() + '|' + selectedType] || 0) : 0;
+      const ach = tgt > 0 ? (m.bmember / tgt) * 100 : null;
+      return { area, ...enrich(m), bmemberTarget: tgt, bmemberAchievement: ach };
+    }).sort((a, b) => b.sales - a.sales);
+    const storesData = Object.entries(byStore).map(([sid, m]) => {
+      const tgt = selectedType ? (targetByStore[sid + '|' + selectedType] || 0) : 0;
+      const ach = tgt > 0 ? (m.bmember / tgt) * 100 : null;
+      return {
+        storeId: sid, storeName: m.storeName, area: m.area, ...enrich(m),
+        bmemberTarget: tgt, bmemberAchievement: ach
+      };
+    }).sort((a, b) => b.sales - a.sales);
+
+    // Totals for B.Member target across selection
+    const totalBmemberTarget = areasData.reduce((s, r) => s + (r.bmemberTarget || 0), 0);
+    const totalBmemberAchievement = totalBmemberTarget > 0 ? (total.bmember / totalBmemberTarget) * 100 : null;
 
     res.json({
       ok: true,
       filters: { months: monthArr, types: typeArr, area: req.query.area || null, storeId: req.query.storeId || null },
-      summary: enrich(total),
+      summary: { ...enrich(total), bmemberTarget: totalBmemberTarget, bmemberAchievement: totalBmemberAchievement },
       types: typesData,
       areas: areasData,
       stores: storesData,
@@ -2072,6 +2137,7 @@ const html = `<!DOCTYPE html>
           <th class="sortable" data-col="bmemberLY">B.Member LY</th>
           <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
           <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
+          <th class="sortable" data-col="bmemberAchievement">Target Achievement</th>
         </tr></thead>
         <tbody id="smAreaBody"></tbody>
         <tfoot id="smAreaFoot"></tfoot>
@@ -2107,6 +2173,7 @@ const html = `<!DOCTYPE html>
           <th class="sortable" data-col="bmemberLY">B.Member LY</th>
           <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
           <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
+          <th class="sortable" data-col="bmemberAchievement">Target Achievement</th>
         </tr></thead>
         <tbody id="smStoreBody"></tbody>
       </table>
@@ -3585,6 +3652,7 @@ const html = `<!DOCTYPE html>
       else if (key === 'salesDiffAmt')   { va = a.salesDiff.amt;   vb = b.salesDiff.amt; }
       else if (key === 'bmemberDiffPct') { va = a.bmemberDiff.pct; vb = b.bmemberDiff.pct; }
       else if (key === 'bmemberDiffAmt') { va = a.bmemberDiff.amt; vb = b.bmemberDiff.amt; }
+      else if (key === 'bmemberAchievement') { va = a.bmemberAchievement; vb = b.bmemberAchievement; }
       else { va = a[key]; vb = b[key]; }
       if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
       if (va === null || isNaN(va)) va = asc ? Infinity : -Infinity;
@@ -3608,6 +3676,9 @@ const html = `<!DOCTYPE html>
       const sdaCls = r.salesDiff.amt >= 0 ? 'pos' : 'neg';
       const bdCls = r.bmemberDiff.pct === null ? '' : (r.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
       const bdaCls = r.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+      const achCls = r.bmemberAchievement === null ? '' : (r.bmemberAchievement >= 100 ? 'pos' : 'neg');
+      const achText = r.bmemberAchievement === null ? '—' : r.bmemberAchievement.toFixed(2) + '%';
+      const achSub = r.bmemberTarget > 0 ? \` <span style="color:#94a094;font-weight:400;font-size:10px;">/ \${smFmtInt(r.bmemberTarget)}</span>\` : '';
       return \`<tr>
         <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area}</span></td>
         <td>\${smFmt(r.sales)}</td>
@@ -3618,6 +3689,7 @@ const html = `<!DOCTYPE html>
         <td>\${smFmtInt(r.bmemberLY)}</td>
         <td class="\${bdCls}">\${r.bmemberDiff.pct === null ? '—' : smFmtPct(r.bmemberDiff.pct)}</td>
         <td class="\${bdaCls}">\${smFmtSignedInt(r.bmemberDiff.amt)}</td>
+        <td class="\${achCls}">\${achText}\${achSub}</td>
       </tr>\`;
     }).join('');
 
@@ -3626,6 +3698,9 @@ const html = `<!DOCTYPE html>
     const sdaCls = t.salesDiff.amt >= 0 ? 'pos' : 'neg';
     const bdCls  = t.bmemberDiff.pct === null ? '' : (t.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
     const bdaCls = t.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+    const tAchCls = t.bmemberAchievement === null ? '' : (t.bmemberAchievement >= 100 ? 'pos' : 'neg');
+    const tAchText = t.bmemberAchievement === null ? '—' : t.bmemberAchievement.toFixed(2) + '%';
+    const tAchSub = t.bmemberTarget > 0 ? \` <span style="color:#94a094;font-weight:500;font-size:10px;">/ \${smFmtInt(t.bmemberTarget)}</span>\` : '';
     document.getElementById('smAreaFoot').innerHTML = \`<tr>
       <td class="text-col">TOTAL · \${smCurrentData.areas.length} AREAS</td>
       <td>\${smFmt(t.sales)}</td>
@@ -3636,6 +3711,7 @@ const html = `<!DOCTYPE html>
       <td>\${smFmtInt(t.bmemberLY)}</td>
       <td class="\${bdCls}">\${t.bmemberDiff.pct === null ? '—' : smFmtPct(t.bmemberDiff.pct)}</td>
       <td class="\${bdaCls}">\${smFmtSignedInt(t.bmemberDiff.amt)}</td>
+      <td class="\${tAchCls}">\${tAchText}\${tAchSub}</td>
     </tr>\`;
   }
 
@@ -3648,6 +3724,9 @@ const html = `<!DOCTYPE html>
       const sdaCls = r.salesDiff.amt >= 0 ? 'pos' : 'neg';
       const bdCls = r.bmemberDiff.pct === null ? '' : (r.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
       const bdaCls = r.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+      const achCls = r.bmemberAchievement === null ? '' : (r.bmemberAchievement >= 100 ? 'pos' : 'neg');
+      const achText = r.bmemberAchievement === null ? '—' : r.bmemberAchievement.toFixed(2) + '%';
+      const achSub = r.bmemberTarget > 0 ? \` <span style="color:#94a094;font-weight:400;font-size:10px;">/ \${smFmtInt(r.bmemberTarget)}</span>\` : '';
       return \`<tr>
         <td class="text-col">#\${r.storeId}</td>
         <td class="text-col">\${r.storeName}</td>
@@ -3660,6 +3739,7 @@ const html = `<!DOCTYPE html>
         <td>\${smFmtInt(r.bmemberLY)}</td>
         <td class="\${bdCls}">\${r.bmemberDiff.pct === null ? '—' : smFmtPct(r.bmemberDiff.pct)}</td>
         <td class="\${bdaCls}">\${smFmtSignedInt(r.bmemberDiff.amt)}</td>
+        <td class="\${achCls}">\${achText}\${achSub}</td>
       </tr>\`;
     }).join('');
   }
