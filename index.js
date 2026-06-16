@@ -625,6 +625,10 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const byStore = {};
     const total = emptyMetric();
     const allTypeSet = new Set();
+    // Sign-up tracked per month (current-month-only logic applied later)
+    const signupByMonth   = {};   // monthLower -> total signup current
+    const signupLYByMonth = {};   // monthLower -> total signup LY
+    const monthOrder = ['january','february','march','april','may','june','july','august','september','october','november','december'];
 
     rows.slice(1).forEach(cols => {
       const t   = C.TYPE      >= 0 ? (cols[C.TYPE]      || '').toString().trim() : '';
@@ -651,6 +655,13 @@ app.get('/api/shopper-metrics', async (req, res) => {
 
       addMetric(total, cols);
 
+      // Track sign-up per month for current-month-only logic
+      if (m && C.SIGNUP >= 0) {
+        const mk = m.toLowerCase();
+        signupByMonth[mk]   = (signupByMonth[mk]   || 0) + num(cols[C.SIGNUP]);
+        if (C.SIGNUPLY >= 0) signupLYByMonth[mk] = (signupLYByMonth[mk] || 0) + num(cols[C.SIGNUPLY]);
+      }
+
       if (ar) {
         if (!byArea[ar]) byArea[ar] = emptyMetric();
         addMetric(byArea[ar], cols);
@@ -673,6 +684,31 @@ app.get('/api/shopper-metrics', async (req, res) => {
       const pct = ly !== 0 ? (amt / Math.abs(ly)) * 100 : null;
       return { amt, pct };
     };
+
+    // Sign-up: use the latest (current) month only, not the sum.
+    // Determine current month = the latest month present in the data (by calendar order),
+    // or the latest among the selected months if a month filter is active.
+    let signupCur = 0, signupLY = 0;
+    const monthsPresent = Object.keys(signupByMonth);
+    if (monthsPresent.length) {
+      const candidateMonths = hasMonthFilter
+        ? monthsPresent.filter(mk => monthSet.has(mk))
+        : monthsPresent;
+      const pool = candidateMonths.length ? candidateMonths : monthsPresent;
+      // pick latest by calendar order
+      let currentMonthKey = pool[0];
+      let bestIdx = -1;
+      pool.forEach(mk => {
+        const idx = monthOrder.indexOf(mk);
+        if (idx > bestIdx) { bestIdx = idx; currentMonthKey = mk; }
+      });
+      signupCur = signupByMonth[currentMonthKey] || 0;
+      signupLY  = signupLYByMonth[currentMonthKey] || 0;
+      total.currentSignupMonth = currentMonthKey;
+    }
+    total.signup   = signupCur;
+    total.signupLY = signupLY;
+
     const enrich = (m) => ({
       ...m,
       salesDiff:    diff(m.sales, m.salesLY),
@@ -1662,6 +1698,31 @@ const html = `<!DOCTYPE html>
     font-size: 12px; color: #1a2e1f; background: white; width: 130px;
   }
   .bd-search-input:focus { outline: none; border-color: #1B5E20; }
+
+  /* Radio group (Type filter) */
+  .radio-group { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .radio-group .radio-btn {
+    position: relative; cursor: pointer; user-select: none;
+  }
+  .radio-group .radio-btn input { position: absolute; opacity: 0; pointer-events: none; }
+  .radio-group .radio-btn span {
+    display: inline-block; padding: 6px 12px; border-radius: 6px;
+    border: 1px solid #d4dad4; background: white;
+    font-size: 12px; font-weight: 600; color: #4a5550;
+    transition: all 0.15s;
+  }
+  .radio-group .radio-btn:hover span { border-color: #2E7D32; }
+  .radio-group .radio-btn input:checked + span {
+    background: #1B5E20; color: white; border-color: #1B5E20;
+  }
+
+  /* Type tag shown on tables/charts */
+  .type-tag {
+    display: inline-block; padding: 2px 9px; border-radius: 10px;
+    background: #1B5E20; color: white; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.5px; text-transform: uppercase; margin-left: 6px;
+    vertical-align: middle;
+  }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
@@ -1968,9 +2029,8 @@ const html = `<!DOCTYPE html>
 
   <div class="filter-bar">
     <label>Type</label>
-    <div class="multi-select" id="smMsType">
-      <button type="button" class="ms-btn" onclick="toggleMs('smMsType')">All Types ▾</button>
-      <div class="ms-panel" id="smMsTypePanel"></div>
+    <div class="radio-group" id="smTypeRadios">
+      <!-- radio buttons injected here -->
     </div>
     <label>Month</label>
     <div class="multi-select" id="smMsMonth">
@@ -1993,13 +2053,13 @@ const html = `<!DOCTYPE html>
 
   <!-- Breakdown by Type chart -->
   <div class="chart-card" style="margin-top:14px;">
-    <div class="chart-title">Growth per Shopper Metrics · Diff % by Type</div>
+    <div class="chart-title">Growth per Shopper Metrics · Diff % by Type <span class="type-tag" id="smTypeChartTag"></span></div>
     <div class="chart-wrap"><canvas id="smChartType"></canvas></div>
   </div>
 
   <!-- Per Area Section -->
   <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Per Area Performance</div>
+    <div class="table-title-bar">Per Area Performance <span class="type-tag" id="smAreaTypeTag"></span></div>
     <div class="table-wrapper">
       <table class="cs-table" id="smAreaTable">
         <thead><tr>
@@ -2021,18 +2081,18 @@ const html = `<!DOCTYPE html>
 
   <div class="cs-charts-row" style="margin-top:8px;">
     <div class="chart-card">
-      <div class="chart-title">Sales Diff % per Area</div>
+      <div class="chart-title">Sales Diff % per Area <span class="type-tag" id="smAreaSalesTypeTag"></span></div>
       <div class="chart-wrap"><canvas id="smChartAreaSales"></canvas></div>
     </div>
     <div class="chart-card">
-      <div class="chart-title">B.Member Diff % per Area</div>
+      <div class="chart-title">B.Member Diff % per Area <span class="type-tag" id="smAreaBMTypeTag"></span></div>
       <div class="chart-wrap"><canvas id="smChartAreaBM"></canvas></div>
     </div>
   </div>
 
   <!-- Per Store Section -->
   <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Per Store Performance</div>
+    <div class="table-title-bar">Per Store Performance <span class="type-tag" id="smStoreTypeTag"></span></div>
     <div class="table-wrapper">
       <table class="cs-table" id="smStoreTable">
         <thead><tr>
@@ -2051,15 +2111,6 @@ const html = `<!DOCTYPE html>
         <tbody id="smStoreBody"></tbody>
       </table>
     </div>
-  </div>
-
-  <div class="chart-card" style="margin-top:8px;">
-    <div class="chart-title">Sales Diff % per Store</div>
-    <div class="chart-wrap chart-wrap-tall"><canvas id="smChartStoreSales"></canvas></div>
-  </div>
-  <div class="chart-card" style="margin-top:8px;">
-    <div class="chart-title">B.Member Diff % per Store</div>
-    <div class="chart-wrap chart-wrap-tall"><canvas id="smChartStoreBM"></canvas></div>
   </div>
 
 </div>
@@ -2506,7 +2557,7 @@ const html = `<!DOCTYPE html>
     const onChange = id === 'msMonth' ? loadData
                    : id === 'psMsMonth' ? loadStorePerf
                    : (id === 'csMsMonth' || id === 'csMsCategory') ? loadCategorySales
-                   : (id === 'smMsMonth' || id === 'smMsType') ? loadShopperMetrics
+                   : id === 'smMsMonth' ? loadShopperMetrics
                    : null;
     const actions = \`
       <div class="ms-actions">
@@ -3366,7 +3417,7 @@ const html = `<!DOCTYPE html>
 
   // ============ SHOPPER METRICS ============
   let smFiltersLoaded = false;
-  let smCharts = { type: null, areaSales: null, areaBM: null, storeSales: null, storeBM: null };
+  let smCharts = { type: null, areaSales: null, areaBM: null };
   let smCurrentData = null;
   let smSorts = {
     area:  { col: 'sales', asc: false },
@@ -3412,12 +3463,31 @@ const html = `<!DOCTYPE html>
     return sign + Math.round(abs).toLocaleString('en-PH');
   }
 
+  const SM_TYPES = ['TNAP', 'KAIN', 'PERKS', 'PAG-IBIG'];
+  let smSelectedType = 'TNAP';
+
+  function buildSmTypeRadios() {
+    const container = document.getElementById('smTypeRadios');
+    container.innerHTML = SM_TYPES.map(t => \`
+      <label class="radio-btn">
+        <input type="radio" name="smType" value="\${t}" \${t === smSelectedType ? 'checked' : ''}>
+        <span>\${t}</span>
+      </label>\`).join('');
+    container.querySelectorAll('input[name=smType]').forEach(r => {
+      r.addEventListener('change', () => {
+        smSelectedType = r.value;
+        loadShopperMetrics();
+      });
+    });
+  }
+
   async function loadSmFilters() {
     if (smFiltersLoaded) return;
     try {
       const res = await fetch('/api/filters');
       const f = await res.json();
       if (!f.ok) return;
+      buildSmTypeRadios();
       buildMsPanel('smMsMonth', f.months, 'All Months');
       const areaSel = document.getElementById('smAreaFilter');
       f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
@@ -3439,12 +3509,11 @@ const html = `<!DOCTYPE html>
 
     try {
       const months = getMsValues('smMsMonth');
-      const types  = getMsValues('smMsType');
       const areaV  = document.getElementById('smAreaFilter').value;
       const storeV = document.getElementById('smStoreFilter').value;
       const params = new URLSearchParams();
       if (months.length) params.set('months', months.join(','));
-      if (types.length)  params.set('types', types.join(','));
+      params.set('types', smSelectedType);   // single type from radio
       if (areaV)         params.set('area', areaV);
       if (storeV)        params.set('storeId', storeV);
 
@@ -3454,25 +3523,25 @@ const html = `<!DOCTYPE html>
 
       smCurrentData = data;
 
-      // Populate Type multi-select on first load
-      if (data.allTypes && data.allTypes.length && !document.querySelector('#smMsTypePanel input')) {
-        buildMsPanel('smMsType', data.allTypes, 'All Types');
-      }
+      // Set Type tags across tables and charts
+      const tag = smSelectedType;
+      ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag','smTypeChartTag'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = id === 'smTypeChartTag' ? 'Selected: ' + tag : tag;
+      });
 
       renderSmKpis(data);
       renderSmTypeChart(data);
       renderSmAreaTable();
       renderSmStoreTable();
       renderSmAreaCharts(data);
-      renderSmStoreCharts(data);
 
       status.className = 'status-bar';
-      const parts = [];
+      const parts = ['Type: ' + smSelectedType];
       if (months.length) parts.push(months.length <= 3 ? 'Months: ' + months.join(', ') : 'Months: ' + months.length + ' selected');
-      if (types.length)  parts.push('Types: ' + types.join(', '));
       if (areaV)  parts.push('Area: ' + areaV);
       if (storeV) parts.push('Store: ' + storeV);
-      const ftxt = parts.join(' · ') || 'No filters';
+      const ftxt = parts.join(' · ');
       status.innerHTML = \`✅ \${ftxt} · \${data.areas.length} areas · \${data.stores.length} stores · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
     } catch (err) {
       status.className = 'status-bar error';
@@ -3489,12 +3558,15 @@ const html = `<!DOCTYPE html>
     const salesPerMemberLY = s.bmemberLY > 0 ? s.salesLY / s.bmemberLY : 0;
     const spmDiff = salesPerMemberLY !== 0 ? ((salesPerMember - salesPerMemberLY) / salesPerMemberLY) * 100 : null;
     const netNewMembers = s.bmember - s.bmemberLY;
+    const signupMonthLabel = s.currentSignupMonth
+      ? s.currentSignupMonth.charAt(0).toUpperCase() + s.currentSignupMonth.slice(1)
+      : 'latest month';
 
     const cards = [
       { label: 'Sales',         value: smFmtMoneyCompact(s.sales),     diff: smFmtPct(s.salesDiff.pct),    cls: s.salesDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',    sub: 'vs ' + smFmtMoneyCompact(s.salesLY) + ' LY' },
       { label: 'B.Member',      value: smFmtCountCompact(s.bmember),    diff: smFmtPct(s.bmemberDiff.pct),  cls: s.bmemberDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',  sub: 'vs ' + smFmtCountCompact(s.bmemberLY) + ' LY' },
       { label: 'TRX Count',     value: smFmtCountCompact(s.trx),        diff: smFmtPct(s.trxDiff.pct),      cls: s.trxDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'vs ' + smFmtCountCompact(s.trxLY) + ' LY' },
-      { label: 'Sign-Up',       value: smFmtCountCompact(s.signup),     diff: smFmtPct(s.signupDiff.pct),   cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',   sub: 'vs ' + smFmtCountCompact(s.signupLY) + ' LY' },
+      { label: 'Sign-Up (Current Month)', value: smFmtCountCompact(s.signup), diff: smFmtPct(s.signupDiff.pct), cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg', sub: signupMonthLabel + ' · vs ' + smFmtCountCompact(s.signupLY) + ' LY' },
       { label: 'Sales / Member',value: smFmtMoneyCompact(salesPerMember), diff: smFmtPct(spmDiff),          cls: (spmDiff || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',     sub: 'avg per buying member' },
       { label: 'Net New Members', value: smFmtSignedInt(netNewMembers), diff: null,                         cls: netNewMembers >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'B.Member − B.Member LY' }
     ];
@@ -3676,40 +3748,6 @@ const html = `<!DOCTYPE html>
     });
   }
 
-  function smDiffHorizBarChart(canvasId, labels, pctData) {
-    const GREEN = '#1B5E20', RED = '#C62828';
-    return new Chart(document.getElementById(canvasId), {
-      type: 'bar',
-      data: {
-        labels: labels,
-        datasets: [{
-          label: 'Diff %',
-          data: pctData.map(v => v === null ? 0 : v),
-          backgroundColor: pctData.map(v => (v >= 0 ? '#66BB6A' : '#EF5350')),
-          borderColor: pctData.map(v => (v >= 0 ? GREEN : RED)),
-          borderWidth: 1.5
-        }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        indexAxis: 'y',
-        plugins: {
-          legend: { display: false },
-          datalabels: {
-            anchor: 'end', align: 'end', offset: 4,
-            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
-            font: { size: 10, weight: 700 },
-            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
-          }
-        },
-        scales: {
-          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
-          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
-        }
-      }
-    });
-  }
-
   function renderSmAreaCharts(data) {
     if (smCharts.areaSales) smCharts.areaSales.destroy();
     if (smCharts.areaBM)    smCharts.areaBM.destroy();
@@ -3718,19 +3756,6 @@ const html = `<!DOCTYPE html>
       labels, data.areas.map(a => a.salesDiff.pct));
     smCharts.areaBM = smDiffBarChart('smChartAreaBM',
       labels, data.areas.map(a => a.bmemberDiff.pct));
-  }
-
-  function renderSmStoreCharts(data) {
-    if (smCharts.storeSales) smCharts.storeSales.destroy();
-    if (smCharts.storeBM)    smCharts.storeBM.destroy();
-    // Dynamic height for tall horizontal charts
-    const tallHeight = Math.max(340, data.stores.length * 24 + 70);
-    document.querySelectorAll('#tab-shopper .chart-wrap-tall').forEach(el => el.style.height = tallHeight + 'px');
-    const labels = data.stores.map(s => s.storeName);
-    smCharts.storeSales = smDiffHorizBarChart('smChartStoreSales',
-      labels, data.stores.map(s => s.salesDiff.pct));
-    smCharts.storeBM = smDiffHorizBarChart('smChartStoreBM',
-      labels, data.stores.map(s => s.bmemberDiff.pct));
   }
   // ============ END SHOPPER METRICS ============
 
