@@ -3523,11 +3523,11 @@ const html = `<!DOCTYPE html>
 
       smCurrentData = data;
 
-      // Set Type tags across tables and charts
+      // Set Type tags across tables and charts (not on the Type breakdown chart itself)
       const tag = smSelectedType;
-      ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag','smTypeChartTag'].forEach(id => {
+      ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.textContent = id === 'smTypeChartTag' ? 'Selected: ' + tag : tag;
+        if (el) el.textContent = tag;
       });
 
       renderSmKpis(data);
