@@ -3900,10 +3900,12 @@ const html = `<!DOCTYPE html>
       options: {
         responsive: true, maintainAspectRatio: false,
         indexAxis: horizontal ? 'y' : 'x',
+        layout: { padding: horizontal ? { right: 40 } : { top: 22 } },
         plugins: {
           legend: { display: false },
           datalabels: {
             anchor: 'end', align: 'end', offset: horizontal ? 4 : 2,
+            clamp: true,
             color: GREEN,
             font: { size: 10, weight: 700 },
             formatter: v => v.toFixed(2) + '%'
@@ -3926,30 +3928,33 @@ const html = `<!DOCTYPE html>
     if (smCharts.sobArea)  smCharts.sobArea.destroy();
     if (smCharts.sobStore) smCharts.sobStore.destroy();
 
-    // Per Type SOB (all 4 types)
+    // Per Type SOB (all 4 types) - sort by SOB desc
+    const typesSorted = [...data.types].sort((a, b) => (b.sob || 0) - (a.sob || 0));
     smCharts.sobType = smSobBarChart(
       'smChartSobType',
-      data.types.map(t => t.type),
-      data.types.map(t => t.sob),
+      typesSorted.map(t => t.type),
+      typesSorted.map(t => t.sob),
       false
     );
 
-    // Per Area SOB
+    // Per Area SOB - sort desc
+    const areasSorted = [...data.areas].sort((a, b) => (b.sob || 0) - (a.sob || 0));
     smCharts.sobArea = smSobBarChart(
       'smChartSobArea',
-      data.areas.map(a => a.area),
-      data.areas.map(a => a.sob),
+      areasSorted.map(a => a.area),
+      areasSorted.map(a => a.sob),
       false
     );
 
-    // Per Store SOB (horizontal, dynamic height)
-    const tallHeight = Math.max(340, data.stores.length * 24 + 70);
+    // Per Store SOB (horizontal, dynamic height) - sort desc
+    const storesSorted = [...data.stores].sort((a, b) => (b.sob || 0) - (a.sob || 0));
+    const tallHeight = Math.max(340, storesSorted.length * 24 + 70);
     const storeWrap = document.getElementById('smChartSobStore').closest('.chart-wrap');
     if (storeWrap) storeWrap.style.height = tallHeight + 'px';
     smCharts.sobStore = smSobBarChart(
       'smChartSobStore',
-      data.stores.map(s => s.storeName),
-      data.stores.map(s => s.sob),
+      storesSorted.map(s => s.storeName),
+      storesSorted.map(s => s.sob),
       true
     );
   }
