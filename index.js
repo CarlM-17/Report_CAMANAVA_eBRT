@@ -561,11 +561,12 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const typeSet = new Set(typeArr.map(t => t.toLowerCase()));
     const hasTypeFilter = typeSet.size > 0;
 
-    const [rows, storeRows, storeTargetRows, areaTargetRows] = await Promise.all([
+    const [rows, storeRows, storeTargetRows, areaTargetRows, salesDataRows] = await Promise.all([
       fetchSheet('ShopperMetricsData'),
       fetchSheet('ListOfStores'),
       fetchSheet('ShopperMetricsTarget'),
-      fetchSheet('AreaShopperTarget')
+      fetchSheet('AreaShopperTarget'),
+      fetchSheet(SHEET_NAME)
     ]);
 
     // Store lookup
@@ -654,6 +655,27 @@ app.get('/api/shopper-metrics', async (req, res) => {
     });
 
     const selectedType = (typeArr[0] || '').toUpperCase();
+
+    // ===== SalesData (for SOB denominator) =====
+    // SalesData cols: A=Month, C=Area, D=StoreID, F=Sales MTD
+    let totalSalesMTD = 0;
+    const salesMTDByArea  = {};
+    const salesMTDByStore = {};
+    salesDataRows.slice(1).forEach(cols => {
+      if (!cols || !cols[5] || cols[5].toString().trim() === '') return;
+      const m  = (cols[0] || '').toString().trim();
+      const sid = (cols[3] || '').toString().trim();
+      // Use ListOfStores for area consistency
+      const ar = sid ? (storeAreaMap[sid] || '') : '';
+      const v  = num(cols[5]);
+      if (!m || !sid) return;
+      if (hasMonthFilter && !monthSet.has(m.toLowerCase())) return;
+      if (scope.areaSet  && !scope.areaSet.has(ar.toLowerCase())) return;
+      if (scope.storeSet && !scope.storeSet.has(sid)) return;
+      totalSalesMTD += v;
+      if (ar)  salesMTDByArea[ar]   = (salesMTDByArea[ar]   || 0) + v;
+      if (sid) salesMTDByStore[sid] = (salesMTDByStore[sid] || 0) + v;
+    });
 
     const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
     const passType  = (t) => !hasTypeFilter  || typeSet.has((t || '').toString().trim().toLowerCase());
@@ -769,18 +791,25 @@ app.get('/api/shopper-metrics', async (req, res) => {
       signupDiff:   diff(m.signup, m.signupLY)
     });
 
-    const typesData  = Object.entries(byType).map(([type, m]) => ({ type, ...enrich(m) })).sort((a, b) => b.sales - a.sales);
+    const typesData  = Object.entries(byType).map(([type, m]) => ({
+      type, ...enrich(m),
+      sob: totalSalesMTD > 0 ? (m.sales / totalSalesMTD) * 100 : null
+    })).sort((a, b) => b.sales - a.sales);
     const areasData  = Object.entries(byArea).map(([area, m]) => {
       const tgt = selectedType ? (targetByArea[area.toLowerCase() + '|' + selectedType] || 0) : 0;
       const ach = tgt > 0 ? (m.bmember / tgt) * 100 : null;
-      return { area, ...enrich(m), bmemberTarget: tgt, bmemberAchievement: ach };
+      const denom = salesMTDByArea[area] || 0;
+      const sob = denom > 0 ? (m.sales / denom) * 100 : null;
+      return { area, ...enrich(m), bmemberTarget: tgt, bmemberAchievement: ach, sob };
     }).sort((a, b) => b.sales - a.sales);
     const storesData = Object.entries(byStore).map(([sid, m]) => {
       const tgt = selectedType ? (targetByStore[sid + '|' + selectedType] || 0) : 0;
       const ach = tgt > 0 ? (m.bmember / tgt) * 100 : null;
+      const denom = salesMTDByStore[sid] || 0;
+      const sob = denom > 0 ? (m.sales / denom) * 100 : null;
       return {
         storeId: sid, storeName: m.storeName, area: m.area, ...enrich(m),
-        bmemberTarget: tgt, bmemberAchievement: ach
+        bmemberTarget: tgt, bmemberAchievement: ach, sob
       };
     }).sort((a, b) => b.sales - a.sales);
 
@@ -2180,6 +2209,20 @@ const html = `<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Share of Business charts -->
+  <div class="chart-card" style="margin-top:14px;">
+    <div class="chart-title">Share of Business (SOB) % by Type</div>
+    <div class="chart-wrap"><canvas id="smChartSobType"></canvas></div>
+  </div>
+  <div class="chart-card" style="margin-top:8px;">
+    <div class="chart-title">Share of Business (SOB) % per Area <span class="type-tag" id="smSobAreaTypeTag"></span></div>
+    <div class="chart-wrap"><canvas id="smChartSobArea"></canvas></div>
+  </div>
+  <div class="chart-card" style="margin-top:8px;">
+    <div class="chart-title">Share of Business (SOB) % per Store <span class="type-tag" id="smSobStoreTypeTag"></span></div>
+    <div class="chart-wrap chart-wrap-tall"><canvas id="smChartSobStore"></canvas></div>
+  </div>
+
 </div>
 
 <script>
@@ -3484,7 +3527,7 @@ const html = `<!DOCTYPE html>
 
   // ============ SHOPPER METRICS ============
   let smFiltersLoaded = false;
-  let smCharts = { type: null, areaSales: null, areaBM: null };
+  let smCharts = { type: null, areaSales: null, areaBM: null, sobType: null, sobArea: null, sobStore: null };
   let smCurrentData = null;
   let smSorts = {
     area:  { col: 'sales', asc: false },
@@ -3592,7 +3635,7 @@ const html = `<!DOCTYPE html>
 
       // Set Type tags across tables and charts (not on the Type breakdown chart itself)
       const tag = smSelectedType;
-      ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag'].forEach(id => {
+      ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag','smSobAreaTypeTag','smSobStoreTypeTag'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.textContent = tag;
       });
@@ -3602,6 +3645,7 @@ const html = `<!DOCTYPE html>
       renderSmAreaTable();
       renderSmStoreTable();
       renderSmAreaCharts(data);
+      renderSmSobCharts(data);
 
       status.className = 'status-bar';
       const parts = ['Type: ' + smSelectedType];
@@ -3836,6 +3880,78 @@ const html = `<!DOCTYPE html>
       labels, data.areas.map(a => a.salesDiff.pct));
     smCharts.areaBM = smDiffBarChart('smChartAreaBM',
       labels, data.areas.map(a => a.bmemberDiff.pct));
+  }
+
+  // SOB single-series bar (vertical), color graded by value
+  function smSobBarChart(canvasId, labels, sobData, horizontal) {
+    const GREEN = '#1B5E20', LIGHT = '#66BB6A';
+    const config = {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'SOB %',
+          data: sobData.map(v => v === null ? 0 : v),
+          backgroundColor: LIGHT,
+          borderColor: GREEN,
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        indexAxis: horizontal ? 'y' : 'x',
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: horizontal ? 4 : 2,
+            color: GREEN,
+            font: { size: 10, weight: 700 },
+            formatter: v => v.toFixed(2) + '%'
+          }
+        },
+        scales: horizontal ? {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        } : {
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } }
+        }
+      }
+    };
+    return new Chart(document.getElementById(canvasId), config);
+  }
+
+  function renderSmSobCharts(data) {
+    if (smCharts.sobType)  smCharts.sobType.destroy();
+    if (smCharts.sobArea)  smCharts.sobArea.destroy();
+    if (smCharts.sobStore) smCharts.sobStore.destroy();
+
+    // Per Type SOB (all 4 types)
+    smCharts.sobType = smSobBarChart(
+      'smChartSobType',
+      data.types.map(t => t.type),
+      data.types.map(t => t.sob),
+      false
+    );
+
+    // Per Area SOB
+    smCharts.sobArea = smSobBarChart(
+      'smChartSobArea',
+      data.areas.map(a => a.area),
+      data.areas.map(a => a.sob),
+      false
+    );
+
+    // Per Store SOB (horizontal, dynamic height)
+    const tallHeight = Math.max(340, data.stores.length * 24 + 70);
+    const storeWrap = document.getElementById('smChartSobStore').closest('.chart-wrap');
+    if (storeWrap) storeWrap.style.height = tallHeight + 'px';
+    smCharts.sobStore = smSobBarChart(
+      'smChartSobStore',
+      data.stores.map(s => s.storeName),
+      data.stores.map(s => s.sob),
+      true
+    );
   }
   // ============ END SHOPPER METRICS ============
 
