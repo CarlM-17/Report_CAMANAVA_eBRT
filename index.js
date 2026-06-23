@@ -1077,10 +1077,12 @@ app.get('/api/data', async (req, res) => {
     const t3 = Date.now();
     const agg = computeMetrics(storeId);
 
-    // Per-store breakdown
+    // Per-store breakdown - apply user scope (allowedAreas/allowedStores) on top of any query filter
     const storeList = storeRows.slice(1)
       .filter(r => r[3] && r[3].trim() !== '')
-      .filter(r => !area || (r[2] || '').toLowerCase() === area.toLowerCase());
+      .filter(r => !area || (r[2] || '').toLowerCase() === area.toLowerCase())
+      .filter(r => !scope.areaSet  || scope.areaSet.has((r[2] || '').toLowerCase()))
+      .filter(r => !scope.storeSet || scope.storeSet.has((r[3] || '').trim()));
 
     const perStore = storeList.map(r => {
       const sid  = (r[3] || '').trim();
