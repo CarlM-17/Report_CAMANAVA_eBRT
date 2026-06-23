@@ -1824,7 +1824,7 @@ const html = `<!DOCTYPE html>
 <body>
 
 <div class="top-nav">
-  <div class="brand">CAMANAVA eBRT <span>ELECTRONIC BUSINESS REVIEW TOOL</span></div>
+  <div class="brand"><span id="brandTitle">CAMANAVA eBRT</span> <span>ELECTRONIC BUSINESS REVIEW TOOL</span></div>
   <div class="nav-right">
     <div class="date-label" id="currentDate"></div>
     <div class="user-box">
@@ -3979,6 +3979,19 @@ const html = `<!DOCTYPE html>
         else if (u.allowedStores && u.allowedStores.length) label += ' · ' + u.allowedStores.length + ' store(s)';
         else if (u.allowedAreas && u.allowedAreas.length)   label += ' · ' + u.allowedAreas.join(', ');
         document.getElementById('userName').textContent = label;
+
+        // Dynamic brand title based on user's area scope
+        const brand = document.getElementById('brandTitle');
+        if (brand && u.allowedAreas && u.allowedAreas.length) {
+          let title;
+          if (u.allowedAreas.length === 1) {
+            title = u.allowedAreas[0] + ' Area eBRT';
+          } else {
+            title = u.allowedAreas.join(' · ') + ' eBRT';
+          }
+          brand.textContent = title;
+          document.title = title;
+        }
       }
     } catch (e) {}
   })();
