@@ -238,7 +238,7 @@ app.get('/api/store-performance', async (req, res) => {
 
     // Index SalesData by store, tracking active months (months with current sales > 0)
     // Also build monthly trend (all months, ignore filter)
-    const salesByStore = {};   // sid -> { sC, sY, activeMonths: Set }
+    const salesByStore = {};   // sid -> { sC, sY, tC, tY, activeMonths: Set }
     const monthlyTrend = {};   // monthName -> { sC, sY }
     salesRows.slice(1).forEach(cols => {
       if (!cols[5] && !cols[6]) return;
@@ -249,10 +249,12 @@ app.get('/api/store-performance', async (req, res) => {
       if (scope.storeSet && !scope.storeSet.has(sid)) return;
 
       if (passMonth(m)) {
-        if (!salesByStore[sid]) salesByStore[sid] = { sC: 0, sY: 0, activeMonths: new Set() };
+        if (!salesByStore[sid]) salesByStore[sid] = { sC: 0, sY: 0, tC: 0, tY: 0, activeMonths: new Set() };
         const curSales = num(cols[5]);
         salesByStore[sid].sC += curSales;
         salesByStore[sid].sY += num(cols[6]);
+        salesByStore[sid].tC += num(cols[12]);  // TRX Count MTD
+        salesByStore[sid].tY += num(cols[14]);  // TRX Count MTD YA
         if (curSales > 0 && m) salesByStore[sid].activeMonths.add(m.toLowerCase());
       }
       if (m) {
@@ -288,7 +290,7 @@ app.get('/api/store-performance', async (req, res) => {
       const name = (r[4] || '').trim();
       const ar   = (r[2] || '').trim();
       const remarks = (r[5] || '').trim();
-      const s    = salesByStore[sid] || { sC: 0, sY: 0, activeMonths: new Set() };
+      const s    = salesByStore[sid] || { sC: 0, sY: 0, tC: 0, tY: 0, activeMonths: new Set() };
       const tgtMap = targetByStoreMonth[sid] || {};
       let target = 0;
       s.activeMonths.forEach(m => { target += (tgtMap[m] || 0); });
@@ -299,11 +301,22 @@ app.get('/api/store-performance', async (req, res) => {
       const valueVsYA = sales - salesYA;
       const pctVsTarget   = target !== 0 ? (sales / target) * 100 : 0;
       const valueVsTarget = sales - target;
+      // TRX Count
+      const trx = s.tC, trxYA = s.tY;
+      const trxGrowth = trxYA !== 0 ? ((trx - trxYA) / Math.abs(trxYA)) * 100 : null;
+      const trxDiffVal = trx - trxYA;
+      // Basket Size = Sales / TRX
+      const basket   = trx   !== 0 ? sales   / trx   : 0;
+      const basketYA = trxYA !== 0 ? salesYA / trxYA : 0;
+      const basketGrowth = basketYA !== 0 ? ((basket - basketYA) / Math.abs(basketYA)) * 100 : null;
+      const basketDiffVal = basket - basketYA;
       return {
         storeId: sid, storeName: name, area: ar, remarks,
         sales, salesYA, index, growth, valueVsYA,
         target, pctVsTarget, valueVsTarget,
-        activeMonthCount: s.activeMonths.size
+        activeMonthCount: s.activeMonths.size,
+        trx, trxYA, trxGrowth, trxDiffVal,
+        basket, basketYA, basketGrowth, basketDiffVal
       };
     });
 
@@ -319,6 +332,15 @@ app.get('/api/store-performance', async (req, res) => {
     total.valueVsYA = total.sales - total.salesYA;
     total.pctVsTarget = total.target !== 0 ? (total.sales / total.target) * 100 : 0;
     total.valueVsTarget = total.sales - total.target;
+    // TRX + basket totals
+    total.trx   = rows.reduce((s, r) => s + r.trx, 0);
+    total.trxYA = rows.reduce((s, r) => s + r.trxYA, 0);
+    total.trxGrowth = total.trxYA !== 0 ? ((total.trx - total.trxYA) / Math.abs(total.trxYA)) * 100 : null;
+    total.trxDiffVal = total.trx - total.trxYA;
+    total.basket   = total.trx   !== 0 ? total.sales   / total.trx   : 0;
+    total.basketYA = total.trxYA !== 0 ? total.salesYA / total.trxYA : 0;
+    total.basketGrowth = total.basketYA !== 0 ? ((total.basket - total.basketYA) / Math.abs(total.basketYA)) * 100 : null;
+    total.basketDiffVal = total.basket - total.basketYA;
 
     // Summary KPIs
     const organicRows = rows.filter(r => r.remarks.toLowerCase() === 'organic');
@@ -334,14 +356,17 @@ app.get('/api/store-performance', async (req, res) => {
       indexVsTarget: total.pctVsTarget,
       declinedCount,
       organicGrowth,
-      organicCount:  organicRows.length
+      organicCount:  organicRows.length,
+      trx: total.trx, trxYA: total.trxYA, trxGrowth: total.trxGrowth, trxDiffVal: total.trxDiffVal,
+      basket: total.basket, basketYA: total.basketYA, basketGrowth: total.basketGrowth, basketDiffVal: total.basketDiffVal
     };
 
     // Charts data
     const MONTHS_ORDER = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const trendData = MONTHS_ORDER
       .map(m => ({ month: m, sC: (monthlyTrend[m] || {}).sC || 0, sY: (monthlyTrend[m] || {}).sY || 0 }))
-      .filter(d => d.sC > 0 || d.sY > 0);
+      .filter(d => d.sC > 0 || d.sY > 0)
+      .map(d => ({ ...d, growth: d.sY !== 0 ? ((d.sC - d.sY) / Math.abs(d.sY)) * 100 : null }));
 
     // Growth Per Area
     const areaAgg = {};
@@ -1665,6 +1690,12 @@ const html = `<!DOCTYPE html>
   /* ===== CATEGORY SALES TAB ===== */
   .kpi-grid-5 { grid-template-columns: repeat(5, 1fr); }
   .kpi-grid-6 { grid-template-columns: repeat(6, 1fr); }
+  .kpi-grid-2 { grid-template-columns: repeat(2, 1fr); max-width: 640px; }
+  .ps-split {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px;
+    align-items: start;
+  }
+  @media (max-width: 900px) { .ps-split { grid-template-columns: 1fr; } }
   @media (max-width: 1100px) {
     .kpi-grid-5 { grid-template-columns: repeat(3, 1fr); }
     .kpi-grid-6 { grid-template-columns: repeat(3, 1fr); }
@@ -1972,6 +2003,56 @@ const html = `<!DOCTYPE html>
     <div class="chart-card">
       <div class="chart-title">Growth vs LY % per Store</div>
       <div class="chart-wrap chart-wrap-tall"><canvas id="chartGrowth"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Transaction Count Section -->
+  <div class="kpi-grid kpi-grid-2" id="psTrxKpiGrid" style="margin-top:16px;"></div>
+  <div class="ps-split">
+    <div class="table-card">
+      <div class="table-title-bar">Transaction Count</div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="psTrxTable">
+          <thead><tr>
+            <th class="sortable" data-col="storeName">Store Name</th>
+            <th class="sortable" data-col="trx">TRX Count</th>
+            <th class="sortable" data-col="trxYA">TRX Count YA</th>
+            <th class="sortable" data-col="trxGrowth">Diff %</th>
+            <th class="sortable" data-col="trxDiffVal">Diff Value</th>
+          </tr></thead>
+          <tbody id="psTrxBody"></tbody>
+          <tfoot id="psTrxFoot"></tfoot>
+        </table>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">TRX Growth vs LY % per Store</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="chartTrxGrowth"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Basket Size Section -->
+  <div class="kpi-grid kpi-grid-2" id="psBasketKpiGrid" style="margin-top:16px;"></div>
+  <div class="ps-split">
+    <div class="table-card">
+      <div class="table-title-bar">Basket Size</div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="psBasketTable">
+          <thead><tr>
+            <th class="sortable" data-col="storeName">Store Name</th>
+            <th class="sortable" data-col="basket">Basket Size</th>
+            <th class="sortable" data-col="basketYA">Basket Size YA</th>
+            <th class="sortable" data-col="basketGrowth">Diff %</th>
+            <th class="sortable" data-col="basketDiffVal">Diff Value</th>
+          </tr></thead>
+          <tbody id="psBasketBody"></tbody>
+          <tfoot id="psBasketFoot"></tfoot>
+        </table>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Basket Size Growth vs LY % per Store</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="chartBasketGrowth"></canvas></div>
     </div>
   </div>
 
@@ -2741,9 +2822,11 @@ const html = `<!DOCTYPE html>
 
   // ========= PER STORE SALES PERFORMANCE =========
   let psFiltersLoaded = false;
-  let psCharts = { trend: null, area: null, target: null, growth: null };
+  let psCharts = { trend: null, area: null, target: null, growth: null, trxGrowth: null, basketGrowth: null };
   let psCurrentData = null;
   let psSort = { col: null, asc: true };
+  let psTrxSort = { col: 'trx', asc: false };
+  let psBasketSort = { col: 'basket', asc: false };
 
   async function loadPsFilters() {
     if (psFiltersLoaded) return;
@@ -2795,9 +2878,12 @@ const html = `<!DOCTYPE html>
 
       psCurrentData = data;
       psSort = { col: null, asc: true };
+      psTrxSort = { col: 'trx', asc: false };
+      psBasketSort = { col: 'basket', asc: false };
       renderPsKpis(data);
       renderPsTable(data);
       renderPsCharts(data);
+      renderPsTrxBasket(data);
 
       status.className = 'status-bar';
       const monthTxt = months.length === 0 ? null
@@ -2953,7 +3039,7 @@ const html = `<!DOCTYPE html>
       }
     };
 
-    // 1) Monthly Sales Trend (line)
+    // 1) Monthly Sales Trend (line) with Growth % overlay
     psCharts.trend = new Chart(document.getElementById('chartTrend'), {
       type: 'line',
       data: {
@@ -2961,26 +3047,37 @@ const html = `<!DOCTYPE html>
         datasets: [
           { label: 'Current', data: data.trendData.map(d => d.sC),
             borderColor: GREEN, backgroundColor: 'rgba(27,94,32,0.1)',
-            borderWidth: 2.5, tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: GREEN },
+            borderWidth: 2.5, tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: GREEN,
+            yAxisID: 'y', datalabels: { display: false } },
           { label: 'Year Ago', data: data.trendData.map(d => d.sY),
             borderColor: YELLOW, backgroundColor: 'rgba(255,193,7,0.05)',
-            borderWidth: 2, tension: 0.3, borderDash: [5,4], pointRadius: 3, pointBackgroundColor: YELLOW }
+            borderWidth: 2, tension: 0.3, borderDash: [5,4], pointRadius: 3, pointBackgroundColor: YELLOW,
+            yAxisID: 'y', datalabels: { display: false } },
+          { label: 'Growth %', data: data.trendData.map(d => d.growth === null ? null : d.growth),
+            type: 'line', borderColor: '#C62828', backgroundColor: '#C62828',
+            borderWidth: 2, tension: 0.3, pointRadius: 4, pointStyle: 'rectRot', pointBackgroundColor: '#C62828',
+            yAxisID: 'yGrowth',
+            datalabels: {
+              display: true, align: 'top', anchor: 'end', offset: 4,
+              color: ctx => (ctx.dataset.data[ctx.dataIndex] >= 0 ? '#2E7D32' : '#C62828'),
+              font: { size: 9, weight: 700 },
+              formatter: v => v === null ? '' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+            } }
         ]
       },
       options: {
         ...commonOpts,
         plugins: {
           ...commonOpts.plugins,
-          datalabels: {
-            align: 'top', anchor: 'end', offset: 4,
-            color: ctx => ctx.dataset.borderColor,
-            font: { size: 9, weight: 700 },
-            formatter: v => compactNum(v)
-          }
+          datalabels: { display: false }
         },
         scales: {
-          ...commonOpts.scales,
-          y: { ...commonOpts.scales.y, ticks: { ...commonOpts.scales.y.ticks, callback: v => compactNum(v) } }
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactNum(v) }, grid: { color: '#eee' } },
+          yGrowth: {
+            position: 'right', grid: { display: false },
+            ticks: { color: '#C62828', font: { size: 10 }, callback: v => v + '%' }
+          }
         }
       }
     });
@@ -3082,6 +3179,209 @@ const html = `<!DOCTYPE html>
       }
     });
   }
+
+  // ----- TRX Count + Basket Size -----
+  function psNum2(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function psInt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return Math.round(n).toLocaleString('en-PH');
+  }
+  function psPct(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+  }
+  function psSortRows(rows, key, asc) {
+    return rows.slice().sort((a, b) => {
+      let va = a[key], vb = b[key];
+      if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      if (va === null || isNaN(va)) va = asc ? Infinity : -Infinity;
+      if (vb === null || isNaN(vb)) vb = asc ? Infinity : -Infinity;
+      return asc ? va - vb : vb - va;
+    });
+  }
+  function psSortInd(tableId, st) {
+    document.querySelectorAll('#' + tableId + ' thead th.sortable').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.col === st.col) th.classList.add(st.asc ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  function renderPsTrxBasket(data) {
+    renderPsTrxTable();
+    renderPsBasketTable();
+
+    // KPI cards
+    const s = data.summary || {};
+    const trxCards = [
+      { label: 'TRX Count vs YA', value: psInt(s.trx), cls: (s.trxGrowth || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',
+        sub: '<b>' + psPct(s.trxGrowth) + '</b> · vs ' + psInt(s.trxYA) + ' YA' },
+      { label: 'TRX Diff Value', value: (s.trxDiffVal >= 0 ? '+' : '') + psInt(s.trxDiffVal), cls: (s.trxDiffVal || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',
+        sub: 'transactions vs last year' }
+    ];
+    document.getElementById('psTrxKpiGrid').innerHTML = trxCards.map(c => \`
+      <div class="kpi-card \${c.cls}">
+        <div class="kpi-label">\${c.label}</div>
+        <div class="kpi-value">\${c.value}</div>
+        <div class="kpi-sub">\${c.sub}</div>
+      </div>\`).join('');
+
+    const basketCards = [
+      { label: 'Basket Size vs YA', value: '₱' + psNum2(s.basket), cls: (s.basketGrowth || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',
+        sub: '<b>' + psPct(s.basketGrowth) + '</b> · vs ₱' + psNum2(s.basketYA) + ' YA' },
+      { label: 'Basket Diff Value', value: (s.basketDiffVal >= 0 ? '+₱' : '-₱') + psNum2(Math.abs(s.basketDiffVal)), cls: (s.basketDiffVal || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',
+        sub: 'avg basket vs last year' }
+    ];
+    document.getElementById('psBasketKpiGrid').innerHTML = basketCards.map(c => \`
+      <div class="kpi-card \${c.cls}">
+        <div class="kpi-label">\${c.label}</div>
+        <div class="kpi-value">\${c.value}</div>
+        <div class="kpi-sub">\${c.sub}</div>
+      </div>\`).join('');
+
+    renderPsTrxBasketCharts(data);
+  }
+
+  function renderPsTrxTable() {
+    if (!psCurrentData) return;
+    const rows = psSortRows(psCurrentData.rows, psTrxSort.col, psTrxSort.asc);
+    psSortInd('psTrxTable', psTrxSort);
+    document.getElementById('psTrxBody').innerHTML = rows.map(r => {
+      const gCls = r.trxGrowth === null ? '' : (r.trxGrowth >= 0 ? 'pos' : 'neg');
+      const dCls = r.trxDiffVal >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col">\${r.storeName}</td>
+        <td>\${psInt(r.trx)}</td>
+        <td>\${psInt(r.trxYA)}</td>
+        <td class="\${gCls}">\${r.trxGrowth === null ? '—' : psPct(r.trxGrowth)}</td>
+        <td class="\${dCls}">\${(r.trxDiffVal >= 0 ? '+' : '') + psInt(r.trxDiffVal)}</td>
+      </tr>\`;
+    }).join('');
+    const t = psCurrentData.total;
+    const gCls = t.trxGrowth === null ? '' : (t.trxGrowth >= 0 ? 'pos' : 'neg');
+    const dCls = t.trxDiffVal >= 0 ? 'pos' : 'neg';
+    document.getElementById('psTrxFoot').innerHTML = \`<tr>
+      <td class="text-col">TOTAL</td>
+      <td>\${psInt(t.trx)}</td>
+      <td>\${psInt(t.trxYA)}</td>
+      <td class="\${gCls}">\${t.trxGrowth === null ? '—' : psPct(t.trxGrowth)}</td>
+      <td class="\${dCls}">\${(t.trxDiffVal >= 0 ? '+' : '') + psInt(t.trxDiffVal)}</td>
+    </tr>\`;
+  }
+
+  function renderPsBasketTable() {
+    if (!psCurrentData) return;
+    const rows = psSortRows(psCurrentData.rows, psBasketSort.col, psBasketSort.asc);
+    psSortInd('psBasketTable', psBasketSort);
+    document.getElementById('psBasketBody').innerHTML = rows.map(r => {
+      const gCls = r.basketGrowth === null ? '' : (r.basketGrowth >= 0 ? 'pos' : 'neg');
+      const dCls = r.basketDiffVal >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col">\${r.storeName}</td>
+        <td>₱\${psNum2(r.basket)}</td>
+        <td>₱\${psNum2(r.basketYA)}</td>
+        <td class="\${gCls}">\${r.basketGrowth === null ? '—' : psPct(r.basketGrowth)}</td>
+        <td class="\${dCls}">\${(r.basketDiffVal >= 0 ? '+₱' : '-₱') + psNum2(Math.abs(r.basketDiffVal))}</td>
+      </tr>\`;
+    }).join('');
+    const t = psCurrentData.total;
+    const gCls = t.basketGrowth === null ? '' : (t.basketGrowth >= 0 ? 'pos' : 'neg');
+    const dCls = t.basketDiffVal >= 0 ? 'pos' : 'neg';
+    document.getElementById('psBasketFoot').innerHTML = \`<tr>
+      <td class="text-col">TOTAL</td>
+      <td>₱\${psNum2(t.basket)}</td>
+      <td>₱\${psNum2(t.basketYA)}</td>
+      <td class="\${gCls}">\${t.basketGrowth === null ? '—' : psPct(t.basketGrowth)}</td>
+      <td class="\${dCls}">\${(t.basketDiffVal >= 0 ? '+₱' : '-₱') + psNum2(Math.abs(t.basketDiffVal))}</td>
+    </tr>\`;
+  }
+
+  function renderPsTrxBasketCharts(data) {
+    if (psCharts.trxGrowth) psCharts.trxGrowth.destroy();
+    if (psCharts.basketGrowth) psCharts.basketGrowth.destroy();
+    const GREEN = '#1B5E20', RED = '#C62828';
+    const tallH = Math.max(340, data.rows.length * 22 + 60);
+    document.querySelectorAll('#chartTrxGrowth, #chartBasketGrowth').forEach(c => {
+      const w = c.closest('.chart-wrap'); if (w) w.style.height = tallH + 'px';
+    });
+
+    const trxSorted = [...data.rows].sort((a,b) => {
+      const av = a.trxGrowth === null ? -Infinity : a.trxGrowth;
+      const bv = b.trxGrowth === null ? -Infinity : b.trxGrowth;
+      return bv - av;
+    });
+    psCharts.trxGrowth = new Chart(document.getElementById('chartTrxGrowth'), {
+      type: 'bar',
+      data: {
+        labels: trxSorted.map(r => r.storeName),
+        datasets: [{
+          data: trxSorted.map(r => r.trxGrowth === null ? 0 : r.trxGrowth),
+          backgroundColor: trxSorted.map(r => (r.trxGrowth >= 0 ? '#66BB6A' : '#EF5350')),
+          borderColor: trxSorted.map(r => (r.trxGrowth >= 0 ? GREEN : RED)), borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        layout: { padding: { right: 44 } },
+        plugins: { legend: { display: false },
+          datalabels: { anchor: 'end', align: 'end', offset: 4, clamp: true,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 9, weight: 700 }, formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%' } },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        }
+      }
+    });
+
+    const basketSorted = [...data.rows].sort((a,b) => {
+      const av = a.basketGrowth === null ? -Infinity : a.basketGrowth;
+      const bv = b.basketGrowth === null ? -Infinity : b.basketGrowth;
+      return bv - av;
+    });
+    psCharts.basketGrowth = new Chart(document.getElementById('chartBasketGrowth'), {
+      type: 'bar',
+      data: {
+        labels: basketSorted.map(r => r.storeName),
+        datasets: [{
+          data: basketSorted.map(r => r.basketGrowth === null ? 0 : r.basketGrowth),
+          backgroundColor: basketSorted.map(r => (r.basketGrowth >= 0 ? '#66BB6A' : '#EF5350')),
+          borderColor: basketSorted.map(r => (r.basketGrowth >= 0 ? GREEN : RED)), borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        layout: { padding: { right: 44 } },
+        plugins: { legend: { display: false },
+          datalabels: { anchor: 'end', align: 'end', offset: 4, clamp: true,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 9, weight: 700 }, formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%' } },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  // Sort handler for TRX + Basket tables
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('#psTrxTable thead th.sortable, #psBasketTable thead th.sortable');
+    if (!th || !psCurrentData) return;
+    const tableId = th.closest('table').id;
+    const col = th.dataset.col;
+    if (tableId === 'psTrxTable') {
+      if (psTrxSort.col === col) psTrxSort.asc = !psTrxSort.asc;
+      else { psTrxSort.col = col; psTrxSort.asc = false; }
+      renderPsTrxTable();
+    } else {
+      if (psBasketSort.col === col) psBasketSort.asc = !psBasketSort.asc;
+      else { psBasketSort.col = col; psBasketSort.asc = false; }
+      renderPsBasketTable();
+    }
+  });
 
   // Trigger load when user opens this tab for the first time
   let psFirstLoad = false;
