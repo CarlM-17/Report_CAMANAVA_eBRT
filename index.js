@@ -368,17 +368,27 @@ app.get('/api/store-performance', async (req, res) => {
       .filter(d => d.sC > 0 || d.sY > 0)
       .map(d => ({ ...d, growth: d.sY !== 0 ? ((d.sC - d.sY) / Math.abs(d.sY)) * 100 : null }));
 
-    // Growth Per Area
+    // Growth Per Area (sales + TRX + basket)
     const areaAgg = {};
     rows.forEach(r => {
-      if (!areaAgg[r.area]) areaAgg[r.area] = { sC: 0, sY: 0 };
+      if (!areaAgg[r.area]) areaAgg[r.area] = { sC: 0, sY: 0, tC: 0, tY: 0 };
       areaAgg[r.area].sC += r.sales;
       areaAgg[r.area].sY += r.salesYA;
+      areaAgg[r.area].tC += r.trx;
+      areaAgg[r.area].tY += r.trxYA;
     });
     const areaGrowth = Object.entries(areaAgg).map(([ar, v]) => ({
       area: ar,
       growth: v.sY !== 0 ? ((v.sC - v.sY) / Math.abs(v.sY)) * 100 : 0
     }));
+    // Per-area TRX + basket growth (for cards)
+    const areaTrxBasket = Object.entries(areaAgg).map(([ar, v]) => {
+      const trxGrowth = v.tY !== 0 ? ((v.tC - v.tY) / Math.abs(v.tY)) * 100 : null;
+      const basket   = v.tC !== 0 ? v.sC / v.tC : 0;
+      const basketYA = v.tY !== 0 ? v.sY / v.tY : 0;
+      const basketGrowth = basketYA !== 0 ? ((basket - basketYA) / Math.abs(basketYA)) * 100 : null;
+      return { area: ar, trx: v.tC, trxYA: v.tY, trxGrowth, basket, basketYA, basketGrowth };
+    }).sort((a, b) => b.trx - a.trx);
 
     res.json({
       ok: true,
@@ -387,7 +397,8 @@ app.get('/api/store-performance', async (req, res) => {
       total,
       summary,
       trendData,
-      areaGrowth
+      areaGrowth,
+      areaTrxBasket
     });
   } catch (err) {
     res.status(err.statusCode || 500).json({ ok: false, error: err.message });
@@ -1696,6 +1707,32 @@ const html = `<!DOCTYPE html>
     align-items: start;
   }
   @media (max-width: 900px) { .ps-split { grid-template-columns: 1fr; } }
+  .area-cards-label {
+    font-size: 11px; font-weight: 700; color: #1B5E20;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin: 10px 0 6px; padding-left: 10px; border-left: 3px solid #FFC107;
+  }
+  .area-cards {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px; margin-bottom: 4px;
+  }
+  .area-card {
+    background: white; border: 1px solid #e8ebe8; border-radius: 8px;
+    padding: 9px 12px; position: relative; overflow: hidden;
+  }
+  .area-card::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  }
+  .area-card.pos::before { background: #2E7D32; }
+  .area-card.neg::before { background: #C62828; }
+  .area-card .ac-name {
+    font-size: 10px; color: #6b7570; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .area-card .ac-val { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .area-card.pos .ac-val { color: #2E7D32; }
+  .area-card.neg .ac-val { color: #C62828; }
   @media (max-width: 1100px) {
     .kpi-grid-5 { grid-template-columns: repeat(3, 1fr); }
     .kpi-grid-6 { grid-template-columns: repeat(3, 1fr); }
@@ -2008,6 +2045,8 @@ const html = `<!DOCTYPE html>
 
   <!-- Transaction Count Section -->
   <div class="kpi-grid kpi-grid-2" id="psTrxKpiGrid" style="margin-top:16px;"></div>
+  <div class="area-cards-label" id="psTrxAreaLabel" style="display:none;">TRX Count Growth % per Area</div>
+  <div class="area-cards" id="psTrxAreaCards"></div>
   <div class="ps-split">
     <div class="table-card">
       <div class="table-title-bar">Transaction Count</div>
@@ -2033,6 +2072,8 @@ const html = `<!DOCTYPE html>
 
   <!-- Basket Size Section -->
   <div class="kpi-grid kpi-grid-2" id="psBasketKpiGrid" style="margin-top:16px;"></div>
+  <div class="area-cards-label" id="psBasketAreaLabel" style="display:none;">Basket Size Growth % per Area</div>
+  <div class="area-cards" id="psBasketAreaCards"></div>
   <div class="ps-split">
     <div class="table-card">
       <div class="table-title-bar">Basket Size</div>
@@ -3240,6 +3281,28 @@ const html = `<!DOCTYPE html>
         <div class="kpi-value">\${c.value}</div>
         <div class="kpi-sub">\${c.sub}</div>
       </div>\`).join('');
+
+    // Per-area growth cards (only show if more than one area in scope)
+    const atb = data.areaTrxBasket || [];
+    const showAreaCards = atb.length > 1;
+    const trxLabel = document.getElementById('psTrxAreaLabel');
+    const basketLabel = document.getElementById('psBasketAreaLabel');
+    trxLabel.style.display = showAreaCards ? 'block' : 'none';
+    basketLabel.style.display = showAreaCards ? 'block' : 'none';
+
+    const trxAreaHtml = showAreaCards ? atb.map(a => {
+      const cls = a.trxGrowth === null ? '' : (a.trxGrowth >= 0 ? 'pos' : 'neg');
+      const val = a.trxGrowth === null ? '—' : (a.trxGrowth >= 0 ? '+' : '') + a.trxGrowth.toFixed(2) + '%';
+      return \`<div class="area-card \${cls}"><div class="ac-name">\${a.area}</div><div class="ac-val">\${val}</div></div>\`;
+    }).join('') : '';
+    document.getElementById('psTrxAreaCards').innerHTML = trxAreaHtml;
+
+    const basketAreaHtml = showAreaCards ? [...atb].sort((a,b)=>b.basket-a.basket).map(a => {
+      const cls = a.basketGrowth === null ? '' : (a.basketGrowth >= 0 ? 'pos' : 'neg');
+      const val = a.basketGrowth === null ? '—' : (a.basketGrowth >= 0 ? '+' : '') + a.basketGrowth.toFixed(2) + '%';
+      return \`<div class="area-card \${cls}"><div class="ac-name">\${a.area}</div><div class="ac-val">\${val}</div></div>\`;
+    }).join('') : '';
+    document.getElementById('psBasketAreaCards').innerHTML = basketAreaHtml;
 
     renderPsTrxBasketCharts(data);
   }
