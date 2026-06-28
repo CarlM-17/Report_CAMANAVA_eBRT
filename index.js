@@ -1137,7 +1137,7 @@ app.get('/api/data', async (req, res) => {
       };
     });
 
-    let breakdownTitle = 'All Stores';
+    let breakdownTitle = 'Region';
     if (storeId) breakdownTitle = storeNameMap[storeId] || storeId;
     else if (area) breakdownTitle = area;
 
@@ -1572,15 +1572,17 @@ const html = `<!DOCTYPE html>
   /* DAILY BREAKDOWN (Daily Sales / TRX / Basket Size) */
   .breakdown-grid { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
   .breakdown-grid .table-card { flex: 1 1 320px; min-width: 280px; }
-  .breakdown-table { width: 100%; border-collapse: collapse; }
-  .breakdown-table thead .section-header td { font-size: 12px; font-weight: 700; padding: 9px 10px; }
-  .breakdown-table td { padding: 6px 8px; font-size: 11.5px; text-align: right; border-bottom: 1px solid #eef1ee; }
-  .breakdown-table td:first-child { text-align: left; font-weight: 600; color: #1B5E20; }
+  .breakdown-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .breakdown-table thead .section-header td { font-size: 11.5px; font-weight: 700; padding: 9px 6px; text-align: center; white-space: normal; }
+  .breakdown-table thead .col-header td { font-size: 9.5px; padding: 6px 4px; white-space: normal; line-height: 1.2; }
+  .breakdown-table td { padding: 5px 6px; font-size: 11px; text-align: right; border-bottom: 1px solid #eef1ee; overflow: hidden; text-overflow: ellipsis; }
+  .breakdown-table tbody td:first-child { text-align: left; font-weight: 600; color: #1B5E20; }
   .breakdown-table tbody tr:nth-child(even) td { background: #fafbf9; }
   .breakdown-table tbody tr:hover td { background: #FFF176; }
   .breakdown-table .pos { color: #2E7D32; font-weight: 700; }
   .breakdown-table .neg { color: #C62828; font-weight: 700; }
   .breakdown-table .empty-cell { color: #c5cdc5; }
+  .breakdown-grid .table-wrapper { overflow-x: visible; }
 
   /* ============ MOBILE RESPONSIVE ============ */
 
@@ -2081,6 +2083,9 @@ const html = `<!DOCTYPE html>
     <div class="table-card">
       <div class="table-wrapper">
         <table class="breakdown-table">
+          <colgroup>
+            <col style="width:22%"/><col style="width:20%"/><col style="width:20%"/><col style="width:19%"/><col style="width:19%"/>
+          </colgroup>
           <thead>
             <tr class="section-header"><td colspan="5" id="bdSalesTitle">Daily Sales</td></tr>
             <tr class="col-header">
@@ -2094,6 +2099,9 @@ const html = `<!DOCTYPE html>
     <div class="table-card">
       <div class="table-wrapper">
         <table class="breakdown-table">
+          <colgroup>
+            <col style="width:28%"/><col style="width:24%"/><col style="width:24%"/><col style="width:24%"/>
+          </colgroup>
           <thead>
             <tr class="section-header"><td colspan="4" id="bdTrxTitle">TRX Count</td></tr>
             <tr class="col-header">
@@ -2107,6 +2115,9 @@ const html = `<!DOCTYPE html>
     <div class="table-card">
       <div class="table-wrapper">
         <table class="breakdown-table">
+          <colgroup>
+            <col style="width:28%"/><col style="width:24%"/><col style="width:24%"/><col style="width:24%"/>
+          </colgroup>
           <thead>
             <tr class="section-header"><td colspan="4" id="bdBasketTitle">Basket Size</td></tr>
             <tr class="col-header">
@@ -2852,7 +2863,7 @@ const html = `<!DOCTYPE html>
   function buildBreakdownTables(data) {
     const title = data.breakdownTitle || 'All Stores';
     document.getElementById('bdSalesTitle').textContent  = title + ' Daily Sales';
-    document.getElementById('bdTrxTitle').textContent    = title + ' TRX Count';
+    document.getElementById('bdTrxTitle').textContent    = title + ' Transaction Count';
     document.getElementById('bdBasketTitle').textContent = title + ' Basket Size';
 
     const rows = data.monthlyBreakdown || [];
