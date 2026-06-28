@@ -1257,6 +1257,96 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
+// Unusual Transactions endpoint - aggregates by Type (col H) and by Store
+app.get('/api/unusual', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const scope = getUserScope(req);
+    const { area, storeId } = req.query;
+    const monthsRaw = (req.query.months || req.query.month || '').toString();
+    const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const monthSet = new Set(monthArr.map(m => m.toLowerCase()));
+    const hasMonthFilter = monthSet.size > 0;
+    const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
+
+    const [storeRows, unusualCurRows, unusualYARows] = await Promise.all([
+      fetchSheet('ListOfStores'),
+      fetchSheet('UnusualCurrent'),
+      fetchSheet('UnusualYearAgo')
+    ]);
+
+    const storeAreaMap = {};
+    const storeNameMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      const ar  = (r[2] || '').trim();
+      const nm  = (r[4] || '').trim();
+      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
+    });
+
+    const passStoreScope = (sid) => !scope.storeSet || scope.storeSet.has(sid);
+    const passAreaScope  = (sid) => !scope.areaSet  || scope.areaSet.has((storeAreaMap[sid] || '').toLowerCase());
+
+    const byType  = {}; // type -> { cur, ya }
+    const byStore = {}; // sid  -> { cur, ya }
+
+    function ingest(rows, key) {
+      rows.slice(1).forEach(cols => {
+        if (!cols || cols.length < 8) return;
+        const rowArea = (cols[0] || '').trim();
+        if (area && rowArea.toLowerCase() !== area.toLowerCase()) return;
+        const sid = (cols[1] || '').trim();
+        if (!sid) return;
+        if (storeId) {
+          if (sid !== storeId) return;
+        } else {
+          if (!passAreaScope(sid) || !passStoreScope(sid)) return;
+        }
+        if (!passMonth(cols[3])) return;
+        const type = (cols[7] || '').trim() || 'Unspecified';
+        const amt  = num(cols[6]);
+        if (!byType[type])  byType[type]  = { cur: 0, ya: 0 };
+        if (!byStore[sid])  byStore[sid]  = { cur: 0, ya: 0 };
+        byType[type][key]  += amt;
+        byStore[sid][key]  += amt;
+      });
+    }
+    ingest(unusualCurRows, 'cur');
+    ingest(unusualYARows,  'ya');
+
+    const _diffPct = (c, y) => y !== 0 ? ((c - y) / Math.abs(y)) * 100 : (c !== 0 ? null : 0);
+    const _diffVal = (c, y) => c - y;
+
+    const types = Object.entries(byType).map(([type, v]) => ({
+      type,
+      amount: v.cur, amountYA: v.ya,
+      diffPct: _diffPct(v.cur, v.ya), diffVal: _diffVal(v.cur, v.ya)
+    })).sort((a, b) => b.amount - a.amount);
+
+    const stores = Object.entries(byStore).map(([sid, v]) => ({
+      storeId: sid,
+      storeName: storeNameMap[sid] || sid,
+      area: storeAreaMap[sid] || '',
+      amount: v.cur, amountYA: v.ya,
+      diffPct: _diffPct(v.cur, v.ya), diffVal: _diffVal(v.cur, v.ya)
+    })).sort((a, b) => b.amount - a.amount);
+
+    const totCur = types.reduce((s, t) => s + t.amount,   0);
+    const totYA  = types.reduce((s, t) => s + t.amountYA, 0);
+
+    res.json({
+      ok: true,
+      filters: { area: area || null, storeId: storeId || null, months: monthArr },
+      total: { amount: totCur, amountYA: totYA, diffPct: _diffPct(totCur, totYA), diffVal: _diffVal(totCur, totYA) },
+      types, stores,
+      elapsedMs: Date.now() - t0
+    });
+  } catch (err) {
+    console.error('Unusual endpoint error:', err);
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+  }
+});
+
 // Debug endpoint: check raw column headers and sample rows
 app.get('/api/debug', async (req, res) => {
   try {
@@ -1812,6 +1902,12 @@ const html = `<!DOCTYPE html>
   .chart-wrap { position: relative; height: 260px; }
   .chart-wrap-tall { height: 340px; }
 
+  /* Unusual Transactions tab */
+  .ut-row { display: flex; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
+  .ut-row .ut-type-card  { flex: 1 1 480px; min-width: 360px; }
+  .ut-row .ut-chart-card { flex: 1 1 420px; min-width: 320px; }
+  #utTypeTable, #utStoreTable { min-width: 0 !important; }
+
   @media (max-width: 900px) {
     .charts-grid { grid-template-columns: 1fr; }
     .chart-wrap { height: 220px; }
@@ -2029,6 +2125,7 @@ const html = `<!DOCTYPE html>
   <button class="tab-btn" onclick="switchTab(this, 'monthly')">Per Store Sales Performance</button>
   <button class="tab-btn" onclick="switchTab(this, 'category')">Category Sales</button>
   <button class="tab-btn" onclick="switchTab(this, 'shopper')">Shopper Metrics</button>
+  <button class="tab-btn" onclick="switchTab(this, 'unusual')">Unusual Transactions</button>
 </div>
 
 <!-- DAILY TAB -->
@@ -2525,6 +2622,71 @@ const html = `<!DOCTYPE html>
 
 </div>
 
+<!-- UNUSUAL TRANSACTIONS TAB -->
+<div id="tab-unusual" class="content" style="display:none;">
+
+  <div class="filter-bar">
+    <label>Month</label>
+    <div class="multi-select" id="utMsMonth">
+      <button type="button" class="ms-btn" onclick="toggleMs('utMsMonth')">All Months ▾</button>
+      <div class="ms-panel" id="utMsMonthPanel"></div>
+    </div>
+    <label>Area</label>
+    <select id="utAreaFilter"><option value="">All Areas</option></select>
+    <label>Store</label>
+    <select id="utStoreFilter"><option value="">All Stores</option></select>
+    <button class="btn-refresh" id="utRefreshBtn" onclick="loadUnusual()">↻ Refresh</button>
+  </div>
+
+  <div id="utStatusBar" class="status-bar loading">
+    <span class="spinner"></span> Loading unusual transactions...
+  </div>
+
+  <!-- Type table + chart row -->
+  <div class="ut-row">
+    <div class="table-card ut-type-card">
+      <div class="table-title-bar">By Type of Unusual</div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="utTypeTable">
+          <thead><tr>
+            <th class="sortable" data-col="type">Type of Unusual</th>
+            <th class="sortable" data-col="amount">Amount</th>
+            <th class="sortable" data-col="amountYA">Amount YA</th>
+            <th class="sortable" data-col="diffPct">Diff %</th>
+            <th class="sortable" data-col="diffVal">Diff Value</th>
+          </tr></thead>
+          <tbody id="utTypeBody"></tbody>
+          <tfoot id="utTypeFoot"></tfoot>
+        </table>
+      </div>
+    </div>
+    <div class="chart-card ut-chart-card">
+      <div class="chart-title">Percentage Growth by Type</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="utChartType"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Per Store table -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Per Store</div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="utStoreTable">
+        <thead><tr>
+          <th class="sortable" data-col="storeId">Store ID</th>
+          <th class="sortable" data-col="storeName">Store Name</th>
+          <th class="sortable" data-col="area">Area</th>
+          <th class="sortable" data-col="amount">Amount</th>
+          <th class="sortable" data-col="amountYA">Amount YA</th>
+          <th class="sortable" data-col="diffPct">Diff %</th>
+          <th class="sortable" data-col="diffVal">Diff Value</th>
+        </tr></thead>
+        <tbody id="utStoreBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
 <script>
   const today = new Date();
   document.getElementById('currentDate').textContent =
@@ -3014,6 +3176,7 @@ const html = `<!DOCTYPE html>
                    : id === 'psMsMonth' ? loadStorePerf
                    : (id === 'csMsMonth' || id === 'csMsCategory') ? loadCategorySales
                    : id === 'smMsMonth' ? loadShopperMetrics
+                   : id === 'utMsMonth' ? loadUnusual
                    : null;
     const actions = \`
       <div class="ms-actions">
@@ -3687,7 +3850,12 @@ const html = `<!DOCTYPE html>
       smFirstLoad = true;
       loadSmFilters().then(() => loadShopperMetrics());
     }
+    if (tabId === 'unusual' && !utFirstLoad) {
+      utFirstLoad = true;
+      loadUtFilters().then(() => loadUnusual());
+    }
   };
+  let utFirstLoad = false;
 
   // ============ CATEGORY SALES ============
   const CAT_COLORS = {
@@ -4588,6 +4756,198 @@ const html = `<!DOCTYPE html>
     await loadFilters();
     loadData();
   })();
+
+  // ============ UNUSUAL TRANSACTIONS TAB ============
+  let utFiltersLoaded = false;
+  let utData = { types: [], stores: [], total: null };
+  let utChart = null;
+  let utTypeSort  = { col: 'amount', asc: false };
+  let utStoreSort = { col: 'amount', asc: false };
+
+  async function loadUtFilters() {
+    if (utFiltersLoaded) return;
+    try {
+      const res = await fetch('/api/filters');
+      const f = await res.json();
+      if (!f.ok) return;
+      buildMsPanel('utMsMonth', f.months, 'All Months');
+      const areaSel = document.getElementById('utAreaFilter');
+      f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+      const storeSel = document.getElementById('utStoreFilter');
+      f.stores.forEach(s => storeSel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} - \${s.name}</option>\`);
+      areaSel.addEventListener('change', loadUnusual);
+      storeSel.addEventListener('change', loadUnusual);
+      utFiltersLoaded = true;
+    } catch (e) { console.error('ut filter load failed', e); }
+  }
+
+  async function loadUnusual() {
+    const btn = document.getElementById('utRefreshBtn');
+    const status = document.getElementById('utStatusBar');
+    btn.classList.add('loading'); btn.textContent = '⏳ Loading...';
+    status.className = 'status-bar loading';
+    status.innerHTML = '<span class="spinner"></span> Loading unusual transactions...';
+    try {
+      const months = getMsValues('utMsMonth');
+      const areaV  = document.getElementById('utAreaFilter').value;
+      const storeV = document.getElementById('utStoreFilter').value;
+      const params = new URLSearchParams();
+      if (months.length) params.set('months', months.join(','));
+      if (areaV)  params.set('area', areaV);
+      if (storeV) params.set('storeId', storeV);
+      const res = await fetch('/api/unusual?' + params.toString());
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+      utData = data;
+      renderUtTypeTable();
+      renderUtStoreTable();
+      renderUtChart();
+      status.className = 'status-bar';
+      status.innerHTML = \`✅ \${data.types.length} types · \${data.stores.length} stores · Total ₱\${fmtNum(data.total.amount)} (YA ₱\${fmtNum(data.total.amountYA)})\`;
+    } catch (err) {
+      status.className = 'status-bar error';
+      status.innerHTML = '❌ Error: ' + err.message;
+    } finally {
+      btn.classList.remove('loading');
+      btn.textContent = '↻ Refresh';
+    }
+  }
+
+  function fmtNum(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '-';
+    return Math.round(v).toLocaleString('en-US');
+  }
+  function fmtPct(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '-';
+    return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+  }
+
+  function sortRows(rows, sort) {
+    if (!sort.col) return rows;
+    return rows.slice().sort((a, b) => {
+      let va = a[sort.col], vb = b[sort.col];
+      if (typeof va === 'string') {
+        return sort.asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      }
+      if (va === null || va === undefined || isNaN(va)) va = -Infinity;
+      if (vb === null || vb === undefined || isNaN(vb)) vb = -Infinity;
+      return sort.asc ? va - vb : vb - va;
+    });
+  }
+
+  function applySortIndicators(tableId, sort) {
+    document.querySelectorAll('#' + tableId + ' thead th').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.col === sort.col) th.classList.add(sort.asc ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  function renderUtTypeTable() {
+    const rows = sortRows(utData.types, utTypeSort);
+    const body = document.getElementById('utTypeBody');
+    body.innerHTML = rows.map(r => {
+      const pctCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
+      const valCls = r.diffVal >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td style="text-align:left;padding-left:14px;font-weight:600;color:#1B5E20;">\${r.type}</td>
+        <td>\${fmtNum(r.amount)}</td>
+        <td>\${fmtNum(r.amountYA)}</td>
+        <td class="\${pctCls}">\${fmtPct(r.diffPct)}</td>
+        <td class="\${valCls}">\${fmtNum(r.diffVal)}</td>
+      </tr>\`;
+    }).join('');
+    const t = utData.total || {};
+    const pctCls = t.diffPct >= 0 ? 'pos' : 'neg';
+    const valCls = t.diffVal >= 0 ? 'pos' : 'neg';
+    document.getElementById('utTypeFoot').innerHTML = \`<tr style="background:#FAF8F0;font-weight:700;">
+      <td style="text-align:left;padding-left:14px;color:#1B5E20;">TOTAL</td>
+      <td>\${fmtNum(t.amount)}</td>
+      <td>\${fmtNum(t.amountYA)}</td>
+      <td class="\${pctCls}">\${fmtPct(t.diffPct)}</td>
+      <td class="\${valCls}">\${fmtNum(t.diffVal)}</td>
+    </tr>\`;
+    applySortIndicators('utTypeTable', utTypeSort);
+  }
+
+  function renderUtStoreTable() {
+    const rows = sortRows(utData.stores, utStoreSort);
+    const body = document.getElementById('utStoreBody');
+    body.innerHTML = rows.map(r => {
+      const pctCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
+      const valCls = r.diffVal >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td style="text-align:left;padding-left:14px;">\${r.storeId}</td>
+        <td style="text-align:left;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
+        <td style="text-align:left;">\${r.area}</td>
+        <td>\${fmtNum(r.amount)}</td>
+        <td>\${fmtNum(r.amountYA)}</td>
+        <td class="\${pctCls}">\${fmtPct(r.diffPct)}</td>
+        <td class="\${valCls}">\${fmtNum(r.diffVal)}</td>
+      </tr>\`;
+    }).join('');
+    applySortIndicators('utStoreTable', utStoreSort);
+  }
+
+  function renderUtChart() {
+    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
+      Chart.register(window.ChartDataLabels);
+      Chart._datalabelsRegistered = true;
+    }
+    const sorted = utData.types.slice()
+      .filter(t => t.diffPct !== null && isFinite(t.diffPct))
+      .sort((a, b) => b.diffPct - a.diffPct);
+    if (utChart) { utChart.destroy(); utChart = null; }
+    const G = '#1B5E20', GL = '#66BB6A', R = '#C62828';
+    utChart = new Chart(document.getElementById('utChartType'), {
+      type: 'bar',
+      data: {
+        labels: sorted.map(t => t.type),
+        datasets: [{
+          label: 'Growth %',
+          data: sorted.map(t => t.diffPct),
+          backgroundColor: sorted.map(t => t.diffPct >= 0 ? GL : R),
+          borderColor:     sorted.map(t => t.diffPct >= 0 ? G  : R),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 4,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? G : R,
+            font: { size: 10, weight: 700 },
+            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 10, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  // Sortable header click handlers
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('th.sortable');
+    if (!th) return;
+    const table = th.closest('table');
+    if (!table) return;
+    const col = th.dataset.col;
+    if (!col) return;
+    if (table.id === 'utTypeTable') {
+      if (utTypeSort.col === col) utTypeSort.asc = !utTypeSort.asc;
+      else { utTypeSort = { col, asc: false }; }
+      renderUtTypeTable();
+    } else if (table.id === 'utStoreTable') {
+      if (utStoreSort.col === col) utStoreSort.asc = !utStoreSort.asc;
+      else { utStoreSort = { col, asc: false }; }
+      renderUtStoreTable();
+    }
+  });
+
 </script>
 </body>
 </html>`;
