@@ -1287,8 +1287,29 @@ app.get('/api/unusual', async (req, res) => {
     const passStoreScope = (sid) => !scope.storeSet || scope.storeSet.has(sid);
     const passAreaScope  = (sid) => !scope.areaSet  || scope.areaSet.has((storeAreaMap[sid] || '').toLowerCase());
 
-    const byType  = {}; // type -> { cur, ya }
-    const byStore = {}; // sid  -> { cur, ya }
+    // Type normalization: case-insensitive + light fuzzy (strip punctuation/extra
+    // whitespace, fold common variants). The canonical display name is chosen as
+    // the most frequent original casing per normalized key.
+    const TYPE_ALIASES = {
+      'wtc': 'WTC Booking',
+      'wtcbooking': 'WTC Booking',
+      'wtc booking': 'WTC Booking',
+      'lgu': 'LGU',
+      'lgubooking': 'LGU Booking'
+    };
+    function normType(raw) {
+      const k = (raw || '').toString().trim().toLowerCase()
+        .replace(/[^a-z0-9 ]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return k;
+    }
+    function titleCase(k) {
+      return k.replace(/\b([a-z])/g, c => c.toUpperCase());
+    }
+
+    const byType  = {}; // normKey -> { cur, ya, displayCounts: {original: n} }
+    const byStore = {}; // sid     -> { cur, ya }
 
     function ingest(rows, key) {
       rows.slice(1).forEach(cols => {
@@ -1303,22 +1324,35 @@ app.get('/api/unusual', async (req, res) => {
           if (!passAreaScope(sid) || !passStoreScope(sid)) return;
         }
         if (!passMonth(cols[3])) return;
-        const type = (cols[7] || '').trim() || 'Unspecified';
-        const amt  = num(cols[6]);
-        if (!byType[type])  byType[type]  = { cur: 0, ya: 0 };
-        if (!byStore[sid])  byStore[sid]  = { cur: 0, ya: 0 };
-        byType[type][key]  += amt;
-        byStore[sid][key]  += amt;
+        const rawType = (cols[7] || '').trim() || 'Unspecified';
+        const nk = normType(rawType) || 'unspecified';
+        const amt = num(cols[6]);
+        if (!byType[nk]) byType[nk] = { cur: 0, ya: 0, displayCounts: {} };
+        byType[nk][key] += amt;
+        byType[nk].displayCounts[rawType] = (byType[nk].displayCounts[rawType] || 0) + 1;
+        if (!byStore[sid]) byStore[sid] = { cur: 0, ya: 0 };
+        byStore[sid][key] += amt;
       });
     }
     ingest(unusualCurRows, 'cur');
     ingest(unusualYARows,  'ya');
 
+    function pickDisplay(nk, counts) {
+      if (TYPE_ALIASES[nk]) return TYPE_ALIASES[nk];
+      let best = null, bestN = -1;
+      for (const [name, n] of Object.entries(counts)) {
+        if (n > bestN || (n === bestN && name.length > (best || '').length)) {
+          best = name; bestN = n;
+        }
+      }
+      return best || titleCase(nk);
+    }
+
     const _diffPct = (c, y) => y !== 0 ? ((c - y) / Math.abs(y)) * 100 : (c !== 0 ? null : 0);
     const _diffVal = (c, y) => c - y;
 
-    const types = Object.entries(byType).map(([type, v]) => ({
-      type,
+    const types = Object.entries(byType).map(([nk, v]) => ({
+      type: pickDisplay(nk, v.displayCounts),
       amount: v.cur, amountYA: v.ya,
       diffPct: _diffPct(v.cur, v.ya), diffVal: _diffVal(v.cur, v.ya)
     })).sort((a, b) => b.amount - a.amount);
