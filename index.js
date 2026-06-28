@@ -1572,7 +1572,7 @@ const html = `<!DOCTYPE html>
   /* DAILY BREAKDOWN (Daily Sales / TRX / Basket Size) */
   .breakdown-grid { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
   .breakdown-grid .table-card { flex: 1 1 320px; min-width: 280px; }
-  .breakdown-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.breakdown-table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
   .breakdown-table thead .section-header td { font-size: 11.5px; font-weight: 700; padding: 9px 6px; text-align: center; white-space: normal; }
   .breakdown-table thead .col-header td { font-size: 9.5px; padding: 6px 4px; white-space: normal; line-height: 1.2; }
   .breakdown-table td { padding: 5px 6px; font-size: 11px; text-align: right; border-bottom: 1px solid #eef1ee; overflow: hidden; text-overflow: ellipsis; }
