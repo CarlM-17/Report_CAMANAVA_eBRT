@@ -3070,6 +3070,7 @@ const html = `<!DOCTYPE html>
           <th class="sortable" data-col="hcTotalYA">HC Total YA</th>
           <th class="sortable" data-col="revPerHcTotal">Revenue / HC</th>
           <th class="sortable" data-col="revPerHcTotalYA">Revenue / HC YA</th>
+          <th class="sortable" data-col="revPerHcGrowth">Revenue / HC Growth %</th>
         </tr></thead>
         <tbody id="finProdBody"></tbody>
       </table>
@@ -5594,6 +5595,7 @@ const html = `<!DOCTYPE html>
   function renderFinProdTable() {
     const enriched = finData.stores.map(s => {
       s.sqmGrowth = s.salesPerSqmYA !== 0 ? ((s.salesPerSqm - s.salesPerSqmYA) / Math.abs(s.salesPerSqmYA)) * 100 : null;
+      s.revPerHcGrowth = s.revPerHcTotalYA !== 0 ? ((s.revPerHcTotal - s.revPerHcTotalYA) / Math.abs(s.revPerHcTotalYA)) * 100 : null;
       return s;
     });
     const rows = finSortRows(enriched, finProdSort);
@@ -5608,6 +5610,7 @@ const html = `<!DOCTYPE html>
       <td>\${finFmtNum(r.hcTotalYA, 0)}</td>
       <td>\${finFmtMoney(r.revPerHcTotal)}</td>
       <td>\${finFmtMoney(r.revPerHcTotalYA)}</td>
+      <td class="\${finPctClass(r.revPerHcGrowth)}">\${finFmtPct(r.revPerHcGrowth, true)}</td>
     </tr>\`).join('');
     finApplySortIndicators('finProdTable', finProdSort);
   }
