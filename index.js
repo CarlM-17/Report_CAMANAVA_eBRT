@@ -1064,13 +1064,17 @@ app.get('/api/data', async (req, res) => {
     // ----- MONTHLY DAILY SALES / TRX / BASKET BREAKDOWN (One Page BRT) -----
     // Independent of the months filter - always broken out by calendar month,
     // scoped to the selected area/store (and user's allowed scope).
+    // Sales: when storeId is set, only that store; otherwise respect area+scope
     const monthlySalesIdx = {}; // month -> {sC,sY,tC,tY}
     salesRows.slice(1).forEach(cols => {
       if (!cols[5] || cols[5].trim() === '') return;
       const sid = (cols[3] || '').trim();
       if (!sid) return;
-      if (!passArea(sid) || !passStoreScope(sid)) return;
-      if (storeId && sid !== storeId) return;
+      if (storeId) {
+        if (sid !== storeId) return;
+      } else {
+        if (!passArea(sid) || !passStoreScope(sid)) return;
+      }
       const month = (cols[0] || '').trim();
       if (!MONTHS.includes(month)) return;
       if (!monthlySalesIdx[month]) monthlySalesIdx[month] = emptyMetric();
@@ -1080,6 +1084,7 @@ app.get('/api/data', async (req, res) => {
       monthlySalesIdx[month].tY += num(cols[14]);
     });
 
+    // Unusual: mirror existing indexUnusual filter (row's own area col, no storeAreaMap lookup)
     const monthlyUnusualIdx = {}; // month -> {uC,uY}
     function addMonthlyUnusual(rows, key) {
       rows.slice(1).forEach(cols => {
@@ -1088,8 +1093,11 @@ app.get('/api/data', async (req, res) => {
         if (area && rowArea.toLowerCase() !== area.toLowerCase()) return;
         const sid = (cols[1] || '').trim();
         if (!sid) return;
-        if (!passArea(sid) || !passStoreScope(sid)) return;
-        if (storeId && sid !== storeId) return;
+        if (storeId) {
+          if (sid !== storeId) return;
+        } else {
+          if (!passStoreScope(sid)) return;
+        }
         const month = (cols[3] || '').trim();
         if (!MONTHS.includes(month)) return;
         if (!monthlyUnusualIdx[month]) monthlyUnusualIdx[month] = { uC: 0, uY: 0 };
