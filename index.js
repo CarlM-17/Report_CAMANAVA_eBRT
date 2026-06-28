@@ -1064,6 +1064,21 @@ app.get('/api/data', async (req, res) => {
     // ----- MONTHLY DAILY SALES / TRX / BASKET BREAKDOWN (One Page BRT) -----
     // Independent of the months filter - always broken out by calendar month,
     // scoped to the selected area/store (and user's allowed scope).
+    // Normalize any month spelling/case to canonical "January".."December".
+    // Accepts: "JAN", "Jan", "january", "JANUARY ", "Sept", "SEPT", etc.
+    const MONTH_LOOKUP = {};
+    MONTHS.forEach(m => {
+      const lc = m.toLowerCase();
+      MONTH_LOOKUP[lc] = m;
+      MONTH_LOOKUP[lc.slice(0, 3)] = m;            // jan, feb, ...
+      MONTH_LOOKUP[lc.slice(0, 4)] = m;            // janu, febr, marc, ...
+    });
+    MONTH_LOOKUP['sept'] = 'September';            // common alt spelling
+    const normMonth = (raw) => {
+      const k = (raw || '').toString().trim().toLowerCase().replace(/\./g, '');
+      return MONTH_LOOKUP[k] || null;
+    };
+
     // Sales: when storeId is set, only that store; otherwise respect area+scope
     const monthlySalesIdx = {}; // month -> {sC,sY,tC,tY}
     salesRows.slice(1).forEach(cols => {
@@ -1075,8 +1090,8 @@ app.get('/api/data', async (req, res) => {
       } else {
         if (!passArea(sid) || !passStoreScope(sid)) return;
       }
-      const month = (cols[0] || '').trim();
-      if (!MONTHS.includes(month)) return;
+      const month = normMonth(cols[0]);
+      if (!month) return;
       if (!monthlySalesIdx[month]) monthlySalesIdx[month] = emptyMetric();
       monthlySalesIdx[month].sC += num(cols[5]);
       monthlySalesIdx[month].sY += num(cols[6]);
@@ -1098,8 +1113,8 @@ app.get('/api/data', async (req, res) => {
         } else {
           if (!passStoreScope(sid)) return;
         }
-        const month = (cols[3] || '').trim();
-        if (!MONTHS.includes(month)) return;
+        const month = normMonth(cols[3]);
+        if (!month) return;
         if (!monthlyUnusualIdx[month]) monthlyUnusualIdx[month] = { uC: 0, uY: 0 };
         monthlyUnusualIdx[month][key] += num(cols[6]);
       });
