@@ -1423,6 +1423,108 @@ app.get('/api/unusual', async (req, res) => {
   }
 });
 
+// Financial Performance endpoint - reads Financial sheet (YTD P&L per store)
+app.get('/api/financial', async (req, res) => {
+  try {
+    const scope = getUserScope(req);
+    const rows = await fetchSheet('Financial');
+    if (!rows || rows.length < 2) return res.json({ ok: true, stores: [], total: null });
+
+    // Money values for margins/opex/income/etc. are stored in thousands of pesos;
+    // multiply by 1000 to convert to actual pesos for display. POS Sales is already in pesos.
+    const K = 1000;
+
+    function parseRow(r) {
+      const code = (r[1] || '').toString().trim();
+      const name = (r[2] || '').toString().trim();
+      if (!name) return null;
+      const isTotal = name.toUpperCase().startsWith('TOTAL');
+      const isMinimart = /^MINIMART/i.test(name);
+      return {
+        rank: parseInt(r[0]) || null,
+        storeCode: code,
+        storeName: name,
+        isTotal, isMinimart,
+        // POS Sales (actual pesos)
+        posSales:     num(r[3]),
+        posSalesYA:   num(r[4]),
+        posSalesDiff: num(r[5]),
+        posSalesPct:  num(r[6]),
+        // Front Margin (₱K)
+        frontMargin:    num(r[7])  * K,
+        frontMarginPct: num(r[8]),
+        frontMarginYA:    num(r[9]) * K,
+        frontMarginPctYA: num(r[10]),
+        // Back Margin (₱K)
+        backMargin:    num(r[13]) * K,
+        backMarginPct: num(r[14]),
+        backMarginYA:    num(r[15]) * K,
+        backMarginPctYA: num(r[16]),
+        // Store OPEX (₱K)
+        opex:    num(r[19]) * K,
+        opexPct: num(r[20]),
+        opexYA:    num(r[21]) * K,
+        opexPctYA: num(r[22]),
+        // Operating Income (₱K)
+        opIncome:    num(r[25]) * K,
+        opIncomePct: num(r[26]),
+        opIncomeYA:    num(r[27]) * K,
+        opIncomePctYA: num(r[28]),
+        // Rent Income (₱K)
+        rentIncome:    num(r[31]) * K,
+        rentIncomePct: num(r[32]),
+        rentIncomeYA:    num(r[33]) * K,
+        rentIncomePctYA: num(r[34]),
+        // NIAT (₱K)
+        niat:    num(r[37]) * K,
+        niatPct: num(r[38]),
+        niatYA:    num(r[39]) * K,
+        niatPctYA: num(r[40]),
+        // EBITDA (₱K)
+        ebitda:    num(r[43]) * K,
+        ebitdaPct: num(r[44]),
+        ebitdaYA:    num(r[45]) * K,
+        ebitdaPctYA: num(r[46]),
+        // Productivity
+        sellingArea:    num(r[49]),
+        salesPerSqm:    num(r[50]),
+        sellingAreaYA:  num(r[51]),
+        salesPerSqmYA:  num(r[52]),
+        hcDirect: num(r[53]), hcAgency: num(r[54]), hcTotal: num(r[55]),
+        revPerHcDirect: num(r[56]), revPerHcAgency: num(r[57]), revPerHcTotal: num(r[58]),
+        hcDirectYA: num(r[59]), hcAgencyYA: num(r[60]), hcTotalYA: num(r[61]),
+        revPerHcDirectYA: num(r[62]), revPerHcAgencyYA: num(r[63]), revPerHcTotalYA: num(r[64])
+      };
+    }
+
+    const all = rows.slice(1).map(parseRow).filter(Boolean);
+    const totalRow = all.find(r => r.isTotal) || null;
+    const stores   = all.filter(r => !r.isTotal);
+
+    // Apply user scope by storeCode (if scope.storeSet is set; area scope not directly mappable here since Financial sheet has no area column)
+    const scoped = scope.storeSet
+      ? stores.filter(s => scope.storeSet.has(s.storeCode))
+      : stores;
+
+    // Apply store-type filter from query
+    const typeFilter = (req.query.type || 'all').toLowerCase();
+    let filtered = scoped;
+    if (typeFilter === 'full')     filtered = scoped.filter(s => !s.isMinimart);
+    else if (typeFilter === 'mini') filtered = scoped.filter(s =>  s.isMinimart);
+
+    res.json({
+      ok: true,
+      filters: { type: typeFilter },
+      stores: filtered,
+      total: totalRow,
+      storeCount: filtered.length
+    });
+  } catch (err) {
+    console.error('Financial endpoint error:', err);
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+  }
+});
+
 // Debug endpoint: check raw column headers and sample rows
 app.get('/api/debug', async (req, res) => {
   try {
@@ -2008,6 +2110,36 @@ const html = `<!DOCTYPE html>
   .chart-wrap { position: relative; height: 260px; }
   .chart-wrap-tall { height: 340px; }
 
+  /* Financial Performance tab */
+  .fin-kpi-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-top: 14px;
+  }
+  @media (max-width: 1100px) { .fin-kpi-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px)  { .fin-kpi-grid { grid-template-columns: 1fr; } }
+  .fin-kpi-grid .kpi-card {
+    background: white; border-radius: 10px; padding: 14px 16px;
+    border: 1px solid #e8ebe8; position: relative;
+  }
+  .fin-kpi-grid .kpi-label {
+    font-size: 10px; font-weight: 700; color: #5a6b5e;
+    letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px;
+  }
+  .fin-kpi-grid .kpi-value {
+    font-size: 20px; font-weight: 800; color: #1a2e1f; line-height: 1.1;
+  }
+  .fin-kpi-grid .kpi-sub {
+    font-size: 11px; color: #5a6b5e; margin-top: 5px; font-weight: 500;
+  }
+  .fin-kpi-grid .kpi-sub .pos { color: #2E7D32; font-weight: 700; }
+  .fin-kpi-grid .kpi-sub .neg { color: #C62828; font-weight: 700; }
+  .fin-kpi-grid .kpi-pct-badge {
+    display: inline-block; font-size: 10px; font-weight: 700;
+    padding: 2px 6px; border-radius: 4px; margin-left: 4px;
+  }
+  .fin-kpi-grid .kpi-pct-badge.pos { background: #E8F5E9; color: #2E7D32; }
+  .fin-kpi-grid .kpi-pct-badge.neg { background: #FFEBEE; color: #C62828; }
+
   /* Unusual Transactions tab */
   .ut-row { display: flex; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
   .ut-row .ut-type-card  { flex: 1 1 480px; min-width: 360px; }
@@ -2232,6 +2364,7 @@ const html = `<!DOCTYPE html>
   <button class="tab-btn" onclick="switchTab(this, 'category')">Category Sales</button>
   <button class="tab-btn" onclick="switchTab(this, 'shopper')">Shopper Metrics</button>
   <button class="tab-btn" onclick="switchTab(this, 'unusual')">Unusual Transactions</button>
+  <button class="tab-btn" onclick="switchTab(this, 'financial')">Financial Performance</button>
 </div>
 
 <!-- DAILY TAB -->
@@ -2797,6 +2930,117 @@ const html = `<!DOCTYPE html>
           <th class="sortable" data-col="diffVal">Diff Value</th>
         </tr></thead>
         <tbody id="utStoreBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- FINANCIAL PERFORMANCE TAB -->
+<div id="tab-financial" class="content" style="display:none;">
+
+  <div class="filter-bar">
+    <label>Store Type</label>
+    <select id="finTypeFilter">
+      <option value="all">All Stores</option>
+      <option value="full">Full Stores Only</option>
+      <option value="mini">Minimarts Only</option>
+    </select>
+    <button class="btn-refresh" id="finRefreshBtn" onclick="loadFinancial()">↻ Refresh</button>
+  </div>
+
+  <div id="finStatusBar" class="status-bar loading">
+    <span class="spinner"></span> Loading financial data...
+  </div>
+
+  <!-- KPI cards: P&L cascade -->
+  <div class="fin-kpi-grid">
+    <div class="kpi-card" id="finKpiSales"></div>
+    <div class="kpi-card" id="finKpiFrontMargin"></div>
+    <div class="kpi-card" id="finKpiBackMargin"></div>
+    <div class="kpi-card" id="finKpiOpex"></div>
+    <div class="kpi-card" id="finKpiOpIncome"></div>
+    <div class="kpi-card" id="finKpiNiat"></div>
+    <div class="kpi-card" id="finKpiEbitda"></div>
+    <div class="kpi-card" id="finKpiSalesPerSqm"></div>
+  </div>
+
+  <!-- P&L Waterfall + Margin breakdown -->
+  <div class="ut-row" style="margin-top:14px;">
+    <div class="chart-card" style="flex:1 1 480px;">
+      <div class="chart-title">P&L Waterfall · Region Total (YTD)</div>
+      <div class="chart-wrap"><canvas id="finChartWaterfall"></canvas></div>
+    </div>
+    <div class="chart-card" style="flex:1 1 420px;">
+      <div class="chart-title">Margin Structure (% to Sales) · Region</div>
+      <div class="chart-wrap"><canvas id="finChartMarginStruct"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Per-store charts -->
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">Sales Growth % per Store</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartSalesGrowth"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">NIAT Margin % per Store</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartNiat"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">EBITDA Margin % per Store</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartEbitda"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Monthly Sales per SQM · Current vs YA</div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartSqm"></canvas></div>
+    </div>
+  </div>
+
+  <!-- P&L Table -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Store P&L (YTD 2026 vs YTD 2025) <span class="type-tag" id="finPlTag"></span></div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="finPlTable">
+        <thead><tr>
+          <th class="sortable" data-col="rank">#</th>
+          <th class="sortable" data-col="storeName">Store</th>
+          <th class="sortable" data-col="posSales">POS Sales</th>
+          <th class="sortable" data-col="posSalesYA">Sales YA</th>
+          <th class="sortable" data-col="posSalesPct">Growth %</th>
+          <th class="sortable" data-col="frontMarginPct">Front Margin %</th>
+          <th class="sortable" data-col="backMarginPct">Back Margin %</th>
+          <th class="sortable" data-col="opexPct">OPEX %</th>
+          <th class="sortable" data-col="opIncome">Op. Income</th>
+          <th class="sortable" data-col="opIncomePct">Op. Inc. %</th>
+          <th class="sortable" data-col="niat">NIAT</th>
+          <th class="sortable" data-col="niatPct">NIAT %</th>
+          <th class="sortable" data-col="ebitda">EBITDA</th>
+          <th class="sortable" data-col="ebitdaPct">EBITDA %</th>
+        </tr></thead>
+        <tbody id="finPlBody"></tbody>
+        <tfoot id="finPlFoot"></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <!-- Productivity Table -->
+  <div class="table-card" style="margin-top:14px;">
+    <div class="table-title-bar">Productivity · Sales per SQM and Headcount</div>
+    <div class="table-wrapper">
+      <table class="cs-table" id="finProdTable">
+        <thead><tr>
+          <th class="sortable" data-col="storeName">Store</th>
+          <th class="sortable" data-col="sellingArea">Selling Area (SQM)</th>
+          <th class="sortable" data-col="salesPerSqm">Mo. Sales/SQM</th>
+          <th class="sortable" data-col="salesPerSqmYA">Mo. Sales/SQM YA</th>
+          <th class="sortable" data-col="sqmGrowth">Sales/SQM Growth %</th>
+          <th class="sortable" data-col="hcTotal">HC Total</th>
+          <th class="sortable" data-col="hcTotalYA">HC Total YA</th>
+          <th class="sortable" data-col="revPerHcTotal">Revenue / HC</th>
+          <th class="sortable" data-col="revPerHcTotalYA">Revenue / HC YA</th>
+        </tr></thead>
+        <tbody id="finProdBody"></tbody>
       </table>
     </div>
   </div>
@@ -4024,8 +4268,13 @@ const html = `<!DOCTYPE html>
       utFirstLoad = true;
       loadUtFilters().then(() => loadUnusual());
     }
+    if (tabId === 'financial' && !finFirstLoad) {
+      finFirstLoad = true;
+      loadFinancial();
+    }
   };
   let utFirstLoad = false;
+  let finFirstLoad = false;
 
   // ============ CATEGORY SALES ============
   const CAT_COLORS = {
@@ -5115,6 +5364,376 @@ const html = `<!DOCTYPE html>
       if (utStoreSort.col === col) utStoreSort.asc = !utStoreSort.asc;
       else { utStoreSort = { col, asc: false }; }
       renderUtStoreTable();
+    }
+  });
+
+  // ============ FINANCIAL PERFORMANCE TAB ============
+  let finData = { stores: [], total: null };
+  let finCharts = {};
+  let finPlSort   = { col: 'rank',        asc: true };
+  let finProdSort = { col: 'salesPerSqm', asc: false };
+
+  document.getElementById('finTypeFilter').addEventListener('change', loadFinancial);
+
+  async function loadFinancial() {
+    const btn = document.getElementById('finRefreshBtn');
+    const status = document.getElementById('finStatusBar');
+    btn.classList.add('loading'); btn.textContent = '⏳ Loading...';
+    status.className = 'status-bar loading';
+    status.innerHTML = '<span class="spinner"></span> Loading financial data...';
+    try {
+      const type = document.getElementById('finTypeFilter').value;
+      const res = await fetch('/api/financial?type=' + encodeURIComponent(type));
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+      finData = data;
+      renderFinKpis();
+      renderFinPlTable();
+      renderFinProdTable();
+      renderFinCharts();
+      status.className = 'status-bar';
+      const typeTxt = type === 'all' ? 'All Stores' : (type === 'full' ? 'Full Stores' : 'Minimarts');
+      status.innerHTML = \`✅ \${typeTxt} · \${data.stores.length} stores · YTD 2026 vs YTD 2025\`;
+      document.getElementById('finPlTag').textContent = typeTxt;
+    } catch (err) {
+      status.className = 'status-bar error';
+      status.innerHTML = '❌ Error: ' + err.message;
+    } finally {
+      btn.classList.remove('loading');
+      btn.textContent = '↻ Refresh';
+    }
+  }
+
+  function finFmtMoney(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '-';
+    const abs = Math.abs(v);
+    if (abs >= 1e9)  return '₱' + (v/1e9).toFixed(2) + 'B';
+    if (abs >= 1e6)  return '₱' + (v/1e6).toFixed(1) + 'M';
+    if (abs >= 1e3)  return '₱' + (v/1e3).toFixed(0) + 'K';
+    return '₱' + Math.round(v).toLocaleString('en-US');
+  }
+  function finFmtNum(v, dec) {
+    if (v === null || v === undefined || !isFinite(v)) return '-';
+    return v.toLocaleString('en-US', { minimumFractionDigits: dec||0, maximumFractionDigits: dec||0 });
+  }
+  function finFmtPct(v, signed) {
+    if (v === null || v === undefined || !isFinite(v)) return '-';
+    const sign = signed && v >= 0 ? '+' : '';
+    return sign + v.toFixed(2) + '%';
+  }
+  function finPctClass(v) {
+    if (v === null || v === undefined || isNaN(v)) return '';
+    return v >= 0 ? 'pos' : 'neg';
+  }
+
+  function finRenderKpi(id, label, value, subtext, deltaPct) {
+    const card = document.getElementById(id);
+    const badge = deltaPct === null || deltaPct === undefined || !isFinite(deltaPct)
+      ? ''
+      : \` <span class="kpi-pct-badge \${finPctClass(deltaPct)}">\${finFmtPct(deltaPct, true)}</span>\`;
+    card.innerHTML = \`
+      <div class="kpi-label">\${label}</div>
+      <div class="kpi-value">\${value}\${badge}</div>
+      <div class="kpi-sub">\${subtext || ''}</div>\`;
+  }
+
+  function finAggregate(stores) {
+    const sum = (k) => stores.reduce((s, r) => s + (r[k] || 0), 0);
+    const totalSales = sum('posSales');
+    const wPct = (k) => totalSales !== 0 ? (sum(k) / totalSales) * 100 : 0;
+    return {
+      posSales: sum('posSales'), posSalesYA: sum('posSalesYA'),
+      frontMargin: sum('frontMargin'), frontMarginYA: sum('frontMarginYA'),
+      backMargin:  sum('backMargin'),  backMarginYA:  sum('backMarginYA'),
+      opex:     sum('opex'),     opexYA:     sum('opexYA'),
+      opIncome: sum('opIncome'), opIncomeYA: sum('opIncomeYA'),
+      rentIncome: sum('rentIncome'), rentIncomeYA: sum('rentIncomeYA'),
+      niat:   sum('niat'),   niatYA:   sum('niatYA'),
+      ebitda: sum('ebitda'), ebitdaYA: sum('ebitdaYA'),
+      sellingArea: sum('sellingArea'),
+      hcTotal: sum('hcTotal'), hcTotalYA: sum('hcTotalYA'),
+      _frontPct: wPct('frontMargin'), _backPct: wPct('backMargin'),
+      _opexPct: wPct('opex'), _opIncPct: wPct('opIncome'),
+      _niatPct: wPct('niat'), _ebitdaPct: wPct('ebitda')
+    };
+  }
+  function finPctDelta(cur, ya) {
+    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : null;
+  }
+
+  function renderFinKpis() {
+    const a = finAggregate(finData.stores);
+    finRenderKpi('finKpiSales', 'POS Sales (YTD)', finFmtMoney(a.posSales),
+      'vs YA: ' + finFmtMoney(a.posSalesYA), finPctDelta(a.posSales, a.posSalesYA));
+    finRenderKpi('finKpiFrontMargin', 'Front Margin', finFmtMoney(a.frontMargin),
+      a._frontPct.toFixed(2) + '% of sales', finPctDelta(a.frontMargin, a.frontMarginYA));
+    finRenderKpi('finKpiBackMargin', 'Back Margin', finFmtMoney(a.backMargin),
+      a._backPct.toFixed(2) + '% of sales', finPctDelta(a.backMargin, a.backMarginYA));
+    // OPEX growth above sales growth is bad - badge color follows the inverted sign
+    const opexDelta = finPctDelta(a.opex, a.opexYA);
+    finRenderKpi('finKpiOpex', 'Store OPEX', finFmtMoney(a.opex),
+      a._opexPct.toFixed(2) + '% of sales', opexDelta === null ? null : -opexDelta);
+    finRenderKpi('finKpiOpIncome', 'Operating Income', finFmtMoney(a.opIncome),
+      a._opIncPct.toFixed(2) + '% of sales', finPctDelta(a.opIncome, a.opIncomeYA));
+    finRenderKpi('finKpiNiat', 'NIAT', finFmtMoney(a.niat),
+      a._niatPct.toFixed(2) + '% of sales', finPctDelta(a.niat, a.niatYA));
+    finRenderKpi('finKpiEbitda', 'EBITDA', finFmtMoney(a.ebitda),
+      a._ebitdaPct.toFixed(2) + '% of sales', finPctDelta(a.ebitda, a.ebitdaYA));
+    const overallSqm = a.sellingArea !== 0 ? (a.posSales / a.sellingArea / 6) : 0;
+    finRenderKpi('finKpiSalesPerSqm', 'Avg Sales / SQM (mo.)', finFmtMoney(overallSqm),
+      'Total selling area: ' + finFmtNum(a.sellingArea, 0) + ' sqm', null);
+  }
+
+  function finSortRows(rows, sort) {
+    return rows.slice().sort((a, b) => {
+      let va = a[sort.col], vb = b[sort.col];
+      if (typeof va === 'string') return sort.asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      if (va === null || va === undefined || isNaN(va)) va = -Infinity;
+      if (vb === null || vb === undefined || isNaN(vb)) vb = -Infinity;
+      return sort.asc ? va - vb : vb - va;
+    });
+  }
+  function finApplySortIndicators(tableId, sort) {
+    document.querySelectorAll('#' + tableId + ' thead th').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.col === sort.col) th.classList.add(sort.asc ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  function renderFinPlTable() {
+    const rows = finSortRows(finData.stores, finPlSort);
+    const body = document.getElementById('finPlBody');
+    body.innerHTML = rows.map(r => \`<tr>
+      <td style="text-align:center;padding-left:14px;">\${r.rank || ''}</td>
+      <td style="text-align:left;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
+      <td>\${finFmtMoney(r.posSales)}</td>
+      <td>\${finFmtMoney(r.posSalesYA)}</td>
+      <td class="\${finPctClass(r.posSalesPct)}">\${finFmtPct(r.posSalesPct, true)}</td>
+      <td>\${finFmtPct(r.frontMarginPct)}</td>
+      <td>\${finFmtPct(r.backMarginPct)}</td>
+      <td>\${finFmtPct(r.opexPct)}</td>
+      <td>\${finFmtMoney(r.opIncome)}</td>
+      <td class="\${finPctClass(r.opIncomePct)}">\${finFmtPct(r.opIncomePct)}</td>
+      <td>\${finFmtMoney(r.niat)}</td>
+      <td class="\${finPctClass(r.niatPct)}">\${finFmtPct(r.niatPct)}</td>
+      <td>\${finFmtMoney(r.ebitda)}</td>
+      <td class="\${finPctClass(r.ebitdaPct)}">\${finFmtPct(r.ebitdaPct)}</td>
+    </tr>\`).join('');
+
+    const agg = finAggregate(finData.stores);
+    const salesGrowth = finPctDelta(agg.posSales, agg.posSalesYA);
+    document.getElementById('finPlFoot').innerHTML = \`<tr style="background:#FAF8F0;font-weight:700;">
+      <td></td>
+      <td style="text-align:left;color:#1B5E20;">SUBTOTAL (\${finData.stores.length})</td>
+      <td>\${finFmtMoney(agg.posSales)}</td>
+      <td>\${finFmtMoney(agg.posSalesYA)}</td>
+      <td class="\${finPctClass(salesGrowth)}">\${finFmtPct(salesGrowth, true)}</td>
+      <td>\${finFmtPct(agg._frontPct)}</td>
+      <td>\${finFmtPct(agg._backPct)}</td>
+      <td>\${finFmtPct(agg._opexPct)}</td>
+      <td>\${finFmtMoney(agg.opIncome)}</td>
+      <td>\${finFmtPct(agg._opIncPct)}</td>
+      <td>\${finFmtMoney(agg.niat)}</td>
+      <td>\${finFmtPct(agg._niatPct)}</td>
+      <td>\${finFmtMoney(agg.ebitda)}</td>
+      <td>\${finFmtPct(agg._ebitdaPct)}</td>
+    </tr>\`;
+    finApplySortIndicators('finPlTable', finPlSort);
+  }
+
+  function renderFinProdTable() {
+    const enriched = finData.stores.map(s => {
+      s.sqmGrowth = s.salesPerSqmYA !== 0 ? ((s.salesPerSqm - s.salesPerSqmYA) / Math.abs(s.salesPerSqmYA)) * 100 : null;
+      return s;
+    });
+    const rows = finSortRows(enriched, finProdSort);
+    document.getElementById('finProdBody').innerHTML = rows.map(r => \`<tr>
+      <td style="text-align:left;padding-left:14px;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
+      <td>\${finFmtNum(r.sellingArea, 0)}</td>
+      <td>\${finFmtMoney(r.salesPerSqm)}</td>
+      <td>\${finFmtMoney(r.salesPerSqmYA)}</td>
+      <td class="\${finPctClass(r.sqmGrowth)}">\${finFmtPct(r.sqmGrowth, true)}</td>
+      <td>\${finFmtNum(r.hcTotal, 0)}</td>
+      <td>\${finFmtNum(r.hcTotalYA, 0)}</td>
+      <td>\${finFmtMoney(r.revPerHcTotal)}</td>
+      <td>\${finFmtMoney(r.revPerHcTotalYA)}</td>
+    </tr>\`).join('');
+    finApplySortIndicators('finProdTable', finProdSort);
+  }
+
+  function renderFinCharts() {
+    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
+      Chart.register(window.ChartDataLabels);
+      Chart._datalabelsRegistered = true;
+    }
+    Object.values(finCharts).forEach(c => { if (c) c.destroy(); });
+    finCharts = {};
+
+    const GREEN = '#1B5E20', GL = '#66BB6A', YELLOW = '#FFC107', RED = '#C62828',
+          BLUE = '#1976D2', AMBER = '#F57C00';
+    const compactMoney = v => {
+      const abs = Math.abs(v);
+      if (abs >= 1e9) return '₱' + (v/1e9).toFixed(1) + 'B';
+      if (abs >= 1e6) return '₱' + (v/1e6).toFixed(0) + 'M';
+      if (abs >= 1e3) return '₱' + (v/1e3).toFixed(0) + 'K';
+      return '₱' + Math.round(v);
+    };
+
+    const a = finAggregate(finData.stores);
+
+    // Dynamic height for per-store horizontal charts
+    const tallH = Math.max(360, finData.stores.length * 22 + 60);
+    ['finChartSalesGrowth','finChartNiat','finChartEbitda','finChartSqm'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && el.parentElement) el.parentElement.style.height = tallH + 'px';
+    });
+
+    // 1) P&L Waterfall (vertical bars)
+    finCharts.waterfall = new Chart(document.getElementById('finChartWaterfall'), {
+      type: 'bar',
+      data: {
+        labels: ['POS Sales','Front Margin','Back Margin','OPEX','Op. Income','Rent Inc.','NIAT','EBITDA'],
+        datasets: [{
+          data: [a.posSales, a.frontMargin, a.backMargin, -a.opex, a.opIncome, a.rentIncome, a.niat, a.ebitda],
+          backgroundColor: [GREEN, GL, GL, RED, BLUE, AMBER, GREEN, GREEN],
+          borderWidth: 0
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? 'end' : 'start',
+            align:  ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? 'end' : 'start',
+            color: '#333', font: { size: 10, weight: 700 },
+            formatter: v => compactMoney(v)
+          },
+          tooltip: { callbacks: { label: ctx => compactMoney(ctx.raw) } }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactMoney(v) }, grid: { color: '#eee' } }
+        }
+      }
+    });
+
+    // 2) Margin Structure - stacked horizontal showing how each ₱1 of sales is split
+    const cogsPct = Math.max(0, 100 - a._frontPct);
+    finCharts.marginStruct = new Chart(document.getElementById('finChartMarginStruct'), {
+      type: 'bar',
+      data: {
+        labels: ['% of Sales'],
+        datasets: [
+          { label: 'COGS', data: [cogsPct], backgroundColor: '#9E9E9E' },
+          { label: 'Front Margin', data: [a._frontPct], backgroundColor: GL },
+          { label: 'Back Margin', data: [a._backPct], backgroundColor: '#43A047' },
+          { label: 'OPEX', data: [a._opexPct], backgroundColor: RED },
+          { label: 'NIAT', data: [a._niatPct], backgroundColor: BLUE }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        plugins: {
+          legend: { position: 'bottom', labels: { font: { size: 10 }, boxWidth: 12 } },
+          datalabels: {
+            color: 'white', font: { size: 10, weight: 700 },
+            formatter: v => v < 3 ? '' : v.toFixed(1) + '%'
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { display: false }, grid: { display: false } }
+        }
+      }
+    });
+
+    function makeHorizontalPctChart(canvasId, dataArr, colorPos, colorNeg) {
+      return new Chart(document.getElementById(canvasId), {
+        type: 'bar',
+        data: {
+          labels: dataArr.map(d => d.label),
+          datasets: [{
+            data: dataArr.map(d => d.value),
+            backgroundColor: dataArr.map(d => d.value >= 0 ? colorPos : colorNeg),
+            borderWidth: 0
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+          plugins: {
+            legend: { display: false },
+            datalabels: {
+              anchor: 'end', align: 'end', offset: 4,
+              color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? colorPos : colorNeg,
+              font: { size: 10, weight: 700 },
+              formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+            }
+          },
+          scales: {
+            x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+            y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
+          }
+        }
+      });
+    }
+
+    // 3) Sales Growth %
+    const sortedSales = finData.stores.slice().sort((a,b) => b.posSalesPct - a.posSalesPct);
+    finCharts.salesGrowth = makeHorizontalPctChart('finChartSalesGrowth',
+      sortedSales.map(s => ({ label: s.storeName, value: s.posSalesPct })), GREEN, RED);
+
+    // 4) NIAT %
+    const sortedNiat = finData.stores.slice().sort((a,b) => b.niatPct - a.niatPct);
+    finCharts.niat = makeHorizontalPctChart('finChartNiat',
+      sortedNiat.map(s => ({ label: s.storeName, value: s.niatPct })), BLUE, RED);
+
+    // 5) EBITDA %
+    const sortedEbitda = finData.stores.slice().sort((a,b) => b.ebitdaPct - a.ebitdaPct);
+    finCharts.ebitda = makeHorizontalPctChart('finChartEbitda',
+      sortedEbitda.map(s => ({ label: s.storeName, value: s.ebitdaPct })), GREEN, RED);
+
+    // 6) Sales/SQM Current vs YA (grouped horizontal)
+    const sortedSqm = finData.stores.slice().sort((a,b) => b.salesPerSqm - a.salesPerSqm);
+    finCharts.sqm = new Chart(document.getElementById('finChartSqm'), {
+      type: 'bar',
+      data: {
+        labels: sortedSqm.map(s => s.storeName),
+        datasets: [
+          { label: 'Current',  data: sortedSqm.map(s => s.salesPerSqm),   backgroundColor: GREEN },
+          { label: 'Year Ago', data: sortedSqm.map(s => s.salesPerSqmYA), backgroundColor: YELLOW }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        plugins: {
+          legend: { position: 'bottom', labels: { font: { size: 10 }, boxWidth: 12 } },
+          datalabels: { display: false }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactMoney(v) }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  // Sortable headers for financial tables
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('th.sortable');
+    if (!th) return;
+    const table = th.closest('table');
+    if (!table) return;
+    const col = th.dataset.col;
+    if (!col) return;
+    if (table.id === 'finPlTable') {
+      if (finPlSort.col === col) finPlSort.asc = !finPlSort.asc;
+      else { finPlSort = { col, asc: (col === 'rank' || col === 'storeName') }; }
+      renderFinPlTable();
+    } else if (table.id === 'finProdTable') {
+      if (finProdSort.col === col) finProdSort.asc = !finProdSort.asc;
+      else { finProdSort = { col, asc: col === 'storeName' }; }
+      renderFinProdTable();
     }
   });
 
