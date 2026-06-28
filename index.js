@@ -1427,8 +1427,21 @@ app.get('/api/unusual', async (req, res) => {
 app.get('/api/financial', async (req, res) => {
   try {
     const scope = getUserScope(req);
-    const rows = await fetchSheet('Financial');
+    const [rows, storeRows] = await Promise.all([
+      fetchSheet('Financial'),
+      fetchSheet('ListOfStores')
+    ]);
     if (!rows || rows.length < 2) return res.json({ ok: true, stores: [], total: null });
+
+    // Build Store ID -> { area, name } from ListOfStores (col D = idx 3, col C = idx 2, col E = idx 4)
+    const storeAreaMap = {};
+    const storeNameMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').toString().trim();
+      const ar  = (r[2] || '').toString().trim();
+      const nm  = (r[4] || '').toString().trim();
+      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
+    });
 
     // Money values for margins/opex/income/etc. are stored in thousands of pesos;
     // multiply by 1000 to convert to actual pesos for display. POS Sales is already in pesos.
@@ -1436,14 +1449,18 @@ app.get('/api/financial', async (req, res) => {
 
     function parseRow(r) {
       const code = (r[1] || '').toString().trim();
-      const name = (r[2] || '').toString().trim();
-      if (!name) return null;
-      const isTotal = name.toUpperCase().startsWith('TOTAL');
-      const isMinimart = /^MINIMART/i.test(name);
+      const rawName = (r[2] || '').toString().trim();
+      if (!rawName) return null;
+      const isTotal = rawName.toUpperCase().startsWith('TOTAL');
+      // Link to ListOfStores using Store Code (Financial col B) = Store ID (ListOfStores col D)
+      const linkedName = !isTotal ? (storeNameMap[code] || rawName) : rawName;
+      const area       = !isTotal ? (storeAreaMap[code] || '') : '';
+      const isMinimart = /^MINIMART/i.test(linkedName) || /^MINIMART/i.test(rawName);
       return {
         rank: parseInt(r[0]) || null,
         storeCode: code,
-        storeName: name,
+        storeName: linkedName,
+        area,
         isTotal, isMinimart,
         // POS Sales (actual pesos)
         posSales:     num(r[3]),
@@ -1501,20 +1518,30 @@ app.get('/api/financial', async (req, res) => {
     const totalRow = all.find(r => r.isTotal) || null;
     const stores   = all.filter(r => !r.isTotal);
 
-    // Apply user scope by storeCode (if scope.storeSet is set; area scope not directly mappable here since Financial sheet has no area column)
-    const scoped = scope.storeSet
-      ? stores.filter(s => scope.storeSet.has(s.storeCode))
-      : stores;
+    // Apply user scope (area + store) — both reuse the same maps the rest of the app uses
+    const scoped = stores.filter(s => {
+      if (scope.areaSet  && !scope.areaSet.has((s.area || '').toLowerCase())) return false;
+      if (scope.storeSet && !scope.storeSet.has(s.storeCode)) return false;
+      return true;
+    });
 
-    // Apply store-type filter from query
+    // Build the area list available to this user (post-scope)
+    const availableAreas = [...new Set(scoped.map(s => s.area).filter(Boolean))].sort();
+
+    // Apply query filters
     const typeFilter = (req.query.type || 'all').toLowerCase();
+    const areaFilter = (req.query.area || '').trim();
     let filtered = scoped;
-    if (typeFilter === 'full')     filtered = scoped.filter(s => !s.isMinimart);
-    else if (typeFilter === 'mini') filtered = scoped.filter(s =>  s.isMinimart);
+    if (areaFilter) {
+      filtered = filtered.filter(s => s.area.toLowerCase() === areaFilter.toLowerCase());
+    }
+    if (typeFilter === 'full')      filtered = filtered.filter(s => !s.isMinimart);
+    else if (typeFilter === 'mini') filtered = filtered.filter(s =>  s.isMinimart);
 
     res.json({
       ok: true,
-      filters: { type: typeFilter },
+      filters: { type: typeFilter, area: areaFilter || null },
+      availableAreas,
       stores: filtered,
       total: totalRow,
       storeCount: filtered.length
@@ -2940,6 +2967,8 @@ const html = `<!DOCTYPE html>
 <div id="tab-financial" class="content" style="display:none;">
 
   <div class="filter-bar">
+    <label>Area</label>
+    <select id="finAreaFilter"><option value="">All Areas</option></select>
     <label>Store Type</label>
     <select id="finTypeFilter">
       <option value="all">All Stores</option>
@@ -3005,6 +3034,7 @@ const html = `<!DOCTYPE html>
         <thead><tr>
           <th class="sortable" data-col="rank">#</th>
           <th class="sortable" data-col="storeName">Store</th>
+          <th class="sortable" data-col="area">Area</th>
           <th class="sortable" data-col="posSales">POS Sales</th>
           <th class="sortable" data-col="posSalesYA">Sales YA</th>
           <th class="sortable" data-col="posSalesPct">Growth %</th>
@@ -3031,6 +3061,7 @@ const html = `<!DOCTYPE html>
       <table class="cs-table" id="finProdTable">
         <thead><tr>
           <th class="sortable" data-col="storeName">Store</th>
+          <th class="sortable" data-col="area">Area</th>
           <th class="sortable" data-col="sellingArea">Selling Area (SQM)</th>
           <th class="sortable" data-col="salesPerSqm">Mo. Sales/SQM</th>
           <th class="sortable" data-col="salesPerSqmYA">Mo. Sales/SQM YA</th>
@@ -5374,6 +5405,17 @@ const html = `<!DOCTYPE html>
   let finProdSort = { col: 'salesPerSqm', asc: false };
 
   document.getElementById('finTypeFilter').addEventListener('change', loadFinancial);
+  document.getElementById('finAreaFilter').addEventListener('change', loadFinancial);
+  let finAreasPopulated = false;
+
+  function populateFinAreas(areas) {
+    if (finAreasPopulated) return;
+    const sel = document.getElementById('finAreaFilter');
+    const current = sel.value;
+    areas.forEach(a => sel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+    if (current) sel.value = current;
+    finAreasPopulated = true;
+  }
 
   async function loadFinancial() {
     const btn = document.getElementById('finRefreshBtn');
@@ -5383,18 +5425,24 @@ const html = `<!DOCTYPE html>
     status.innerHTML = '<span class="spinner"></span> Loading financial data...';
     try {
       const type = document.getElementById('finTypeFilter').value;
-      const res = await fetch('/api/financial?type=' + encodeURIComponent(type));
+      const area = document.getElementById('finAreaFilter').value;
+      const params = new URLSearchParams();
+      params.set('type', type);
+      if (area) params.set('area', area);
+      const res = await fetch('/api/financial?' + params.toString());
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || 'Unknown error');
       finData = data;
+      populateFinAreas(data.availableAreas || []);
       renderFinKpis();
       renderFinPlTable();
       renderFinProdTable();
       renderFinCharts();
       status.className = 'status-bar';
       const typeTxt = type === 'all' ? 'All Stores' : (type === 'full' ? 'Full Stores' : 'Minimarts');
-      status.innerHTML = \`✅ \${typeTxt} · \${data.stores.length} stores · YTD 2026 vs YTD 2025\`;
-      document.getElementById('finPlTag').textContent = typeTxt;
+      const tag = (area ? area + ' · ' : '') + typeTxt;
+      status.innerHTML = \`✅ \${tag} · \${data.stores.length} stores · YTD 2026 vs YTD 2025\`;
+      document.getElementById('finPlTag').textContent = tag;
     } catch (err) {
       status.className = 'status-bar error';
       status.innerHTML = '❌ Error: ' + err.message;
@@ -5506,6 +5554,7 @@ const html = `<!DOCTYPE html>
     body.innerHTML = rows.map(r => \`<tr>
       <td style="text-align:center;padding-left:14px;">\${r.rank || ''}</td>
       <td style="text-align:left;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
+      <td style="text-align:left;">\${r.area || ''}</td>
       <td>\${finFmtMoney(r.posSales)}</td>
       <td>\${finFmtMoney(r.posSalesYA)}</td>
       <td class="\${finPctClass(r.posSalesPct)}">\${finFmtPct(r.posSalesPct, true)}</td>
@@ -5525,6 +5574,7 @@ const html = `<!DOCTYPE html>
     document.getElementById('finPlFoot').innerHTML = \`<tr style="background:#FAF8F0;font-weight:700;">
       <td></td>
       <td style="text-align:left;color:#1B5E20;">SUBTOTAL (\${finData.stores.length})</td>
+      <td></td>
       <td>\${finFmtMoney(agg.posSales)}</td>
       <td>\${finFmtMoney(agg.posSalesYA)}</td>
       <td class="\${finPctClass(salesGrowth)}">\${finFmtPct(salesGrowth, true)}</td>
@@ -5549,6 +5599,7 @@ const html = `<!DOCTYPE html>
     const rows = finSortRows(enriched, finProdSort);
     document.getElementById('finProdBody').innerHTML = rows.map(r => \`<tr>
       <td style="text-align:left;padding-left:14px;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
+      <td style="text-align:left;">\${r.area || ''}</td>
       <td>\${finFmtNum(r.sellingArea, 0)}</td>
       <td>\${finFmtMoney(r.salesPerSqm)}</td>
       <td>\${finFmtMoney(r.salesPerSqmYA)}</td>
