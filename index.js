@@ -2167,6 +2167,39 @@ const html = `<!DOCTYPE html>
   .fin-kpi-grid .kpi-pct-badge.pos { background: #E8F5E9; color: #2E7D32; }
   .fin-kpi-grid .kpi-pct-badge.neg { background: #FFEBEE; color: #C62828; }
 
+  /* Financial tab glossary */
+  .fin-glossary {
+    background: white; border-radius: 10px; padding: 18px 20px;
+    border: 1px solid #e8ebe8;
+  }
+  .fin-glossary-title {
+    font-size: 14px; font-weight: 700; color: #1B5E20;
+    padding-left: 10px; border-left: 4px solid #FFC107;
+    margin-bottom: 14px; letter-spacing: 0.3px;
+  }
+  .fin-glossary-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 20px;
+  }
+  @media (max-width: 800px) { .fin-glossary-grid { grid-template-columns: 1fr; } }
+  .fin-glossary-item {
+    padding: 8px 0; border-bottom: 1px solid #f0f2ef;
+  }
+  .fin-glossary-item:last-child { border-bottom: none; }
+  .fin-glossary-term {
+    font-size: 12px; font-weight: 700; color: #1B5E20;
+    margin-bottom: 3px; letter-spacing: 0.2px;
+  }
+  .fin-glossary-def {
+    font-size: 11.5px; color: #3d4a40; line-height: 1.5;
+  }
+  .fin-glossary-def em { color: #1B5E20; font-style: normal; font-weight: 600; }
+  .fin-glossary-note {
+    margin-top: 14px; padding: 10px 14px;
+    background: #F1F8E9; border-left: 3px solid #689F38; border-radius: 6px;
+    font-size: 11.5px; color: #1a2e1f; line-height: 1.5;
+  }
+  .fin-glossary-note strong { color: #1B5E20; }
+
   /* Unusual Transactions tab */
   .ut-row { display: flex; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
   .ut-row .ut-type-card  { flex: 1 1 480px; min-width: 360px; }
@@ -3074,6 +3107,89 @@ const html = `<!DOCTYPE html>
         </tr></thead>
         <tbody id="finProdBody"></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Glossary - explanations at the bottom of the tab -->
+  <div class="fin-glossary" style="margin-top:14px;">
+    <div class="fin-glossary-title">📘 Glossary · What do these numbers mean?</div>
+    <div class="fin-glossary-grid">
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">POS Sales</div>
+        <div class="fin-glossary-def">Total revenue rung up at the register over the period (YTD). The "top line."</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Growth %</div>
+        <div class="fin-glossary-def">POS Sales vs the same period last year, expressed as a percentage. Positive = growing.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Front Margin</div>
+        <div class="fin-glossary-def">Sales minus Cost of Goods Sold (COGS). The retail markup the store earns before any expenses.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Back Margin</div>
+        <div class="fin-glossary-def">Income from suppliers (rebates, listing fees, promo support, volume discounts). Adds to gross margin.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Store OPEX</div>
+        <div class="fin-glossary-def">Operating Expenses — day-to-day cost of running the store: rent, salaries, utilities, supplies, etc.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Operating Income</div>
+        <div class="fin-glossary-def">(Front Margin + Back Margin) − OPEX. The profit from the store's core retail operation.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Rent Income</div>
+        <div class="fin-glossary-def">Money earned from leasing space inside the store to other tenants (kiosks, food stalls, ATMs).</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">NIAT</div>
+        <div class="fin-glossary-def">Net Income After Tax — the bottom line. What's left after all expenses, other income, and taxes.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">EBITDA</div>
+        <div class="fin-glossary-def">Earnings Before Interest, Tax, Depreciation &amp; Amortization. A cash-earnings proxy that strips out non-cash and financing items, so stores are easier to compare.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">% to Sales</div>
+        <div class="fin-glossary-def">Any line item divided by POS Sales. Tells you how big each cost or profit is <em>relative to</em> the size of the store. Better for comparing stores of different sizes than raw peso amounts.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Selling Area (SQM)</div>
+        <div class="fin-glossary-def">Square meters of floor space used for selling. Used to gauge how productive each square meter is.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Mo. Sales / SQM</div>
+        <div class="fin-glossary-def">Average monthly sales per square meter of selling area. A productivity benchmark — higher means the store extracts more value from its footprint.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Headcount (Direct / Agency / Total)</div>
+        <div class="fin-glossary-def">Direct = company employees. Agency = contracted/outsourced workers. Total = combined.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Revenue / HC</div>
+        <div class="fin-glossary-def">Total revenue ÷ total headcount. Measures workforce productivity — how much sales each person on payroll generates.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">Revenue / HC Growth %</div>
+        <div class="fin-glossary-def">Year-over-year change in workforce productivity. Rising = each employee is generating more sales than last year.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">YA (Year Ago)</div>
+        <div class="fin-glossary-def">Same line item from the same period last year — the comparison baseline for all growth metrics.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">YTD</div>
+        <div class="fin-glossary-def">Year-To-Date. Cumulative total from January 1 through the latest reported month of the current year.</div>
+      </div>
+      <div class="fin-glossary-item">
+        <div class="fin-glossary-term">P&amp;L (Profit &amp; Loss)</div>
+        <div class="fin-glossary-def">A standard financial statement that walks from Sales at the top down to NIAT at the bottom, showing where the money goes at each step. Also called the Income Statement.</div>
+      </div>
+    </div>
+    <div class="fin-glossary-note">
+      💡 <strong>Reading the P&amp;L cascade:</strong> Start with POS Sales. Add Front + Back Margin (gross profit). Subtract OPEX → Operating Income.
+      Add Rent Income, subtract tax → NIAT (bottom line). The Waterfall chart at the top visualizes this step-by-step.
     </div>
   </div>
 
