@@ -405,6 +405,48 @@ app.get('/api/store-performance', async (req, res) => {
   }
 });
 
+// Lightweight Monthly Sales Trend endpoint (area/store scoped) - used by the
+// inline filters inside the Per Store Sales Performance > Monthly Sales Trend chart.
+app.get('/api/trend', async (req, res) => {
+  try {
+    const scope = getUserScope(req);
+    const { area, storeId } = req.query;
+    const [salesRows, storeRows] = await Promise.all([
+      fetchSheet(SHEET_NAME),
+      fetchSheet('ListOfStores')
+    ]);
+    const storeAreaMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      const ar  = (r[2] || '').trim();
+      if (sid) storeAreaMap[sid] = ar;
+    });
+    const monthly = {};
+    salesRows.slice(1).forEach(cols => {
+      if (!cols[5] && !cols[6]) return;
+      const sid = (cols[3] || '').trim();
+      const m   = (cols[0] || '').toString().trim();
+      if (!sid || !m) return;
+      const ar = storeAreaMap[sid] || '';
+      if (scope.areaSet  && !scope.areaSet.has(ar.toLowerCase())) return;
+      if (scope.storeSet && !scope.storeSet.has(sid)) return;
+      if (area    && ar.toLowerCase() !== area.toLowerCase()) return;
+      if (storeId && sid !== storeId) return;
+      if (!monthly[m]) monthly[m] = { sC: 0, sY: 0 };
+      monthly[m].sC += num(cols[5]);
+      monthly[m].sY += num(cols[6]);
+    });
+    const MONTHS_ORDER = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const trendData = MONTHS_ORDER
+      .map(m => ({ month: m, sC: (monthly[m] || {}).sC || 0, sY: (monthly[m] || {}).sY || 0 }))
+      .filter(d => d.sC > 0 || d.sY > 0)
+      .map(d => ({ ...d, growth: d.sY !== 0 ? ((d.sC - d.sY) / Math.abs(d.sY)) * 100 : null }));
+    res.json({ ok: true, trendData });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+  }
+});
+
 // Category Sales endpoint - reads CategorySales sheet
 app.get('/api/category-sales', async (req, res) => {
   try {
@@ -1924,6 +1966,36 @@ const html = `<!DOCTYPE html>
     display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
     margin-top: 16px;
   }
+  .charts-row-asym {
+    display: grid; grid-template-columns: 1.86fr 1fr; gap: 14px;
+    margin-top: 16px;
+  }
+  .chart-title-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .chart-title-row .chart-title { margin-bottom: 0; }
+  .chart-inline-filters {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .chart-inline-filters label {
+    font-size: 10px; font-weight: 700; color: #1B5E20;
+    text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  .chart-inline-filters select {
+    border: 1px solid #d4dad4; border-radius: 6px; padding: 4px 8px;
+    font-size: 11px; color: #1a2e1f; background: white; font-weight: 500;
+    max-width: 160px;
+  }
+  .chart-inline-filters select:hover { border-color: #2E7D32; }
+  .chart-inline-filters select:focus {
+    outline: none; border-color: #1B5E20;
+    box-shadow: 0 0 0 2px rgba(27,94,32,0.12);
+  }
+  @media (max-width: 900px) {
+    .charts-row-asym { grid-template-columns: 1fr; }
+    .chart-title-row { flex-direction: column; align-items: flex-start; }
+  }
   .chart-card {
     background: white; border-radius: 10px;
     border: 1px solid #e8ebe8; padding: 14px 16px;
@@ -2330,16 +2402,26 @@ const html = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Charts grid (2x2) -->
-  <div class="charts-grid">
+  <!-- Charts row 1: wide trend (65%) + narrow area (35%) -->
+  <div class="charts-row-asym">
     <div class="chart-card">
-      <div class="chart-title">Monthly Sales Trend</div>
+      <div class="chart-title-row">
+        <div class="chart-title">Monthly Sales Trend</div>
+        <div class="chart-inline-filters">
+          <label>Area</label>
+          <select id="trendAreaFilter"><option value="">All Areas</option></select>
+          <label>Store</label>
+          <select id="trendStoreFilter"><option value="">All Stores</option></select>
+        </div>
+      </div>
       <div class="chart-wrap"><canvas id="chartTrend"></canvas></div>
     </div>
     <div class="chart-card">
       <div class="chart-title">Growth Per Area</div>
       <div class="chart-wrap"><canvas id="chartAreaGrowth"></canvas></div>
     </div>
+  </div>
+  <div class="charts-grid">
     <div class="chart-card">
       <div class="chart-title">Target Achievement per Store</div>
       <div class="chart-wrap chart-wrap-tall"><canvas id="chartTarget"></canvas></div>
@@ -3298,8 +3380,102 @@ const html = `<!DOCTYPE html>
       const areaSel  = document.getElementById('psAreaFilter');
       f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
       areaSel.addEventListener('change', loadStorePerf);
+
+      // Inline trend chart filters (separate from tab-wide filters)
+      const tAreaSel  = document.getElementById('trendAreaFilter');
+      const tStoreSel = document.getElementById('trendStoreFilter');
+      psAllStores = f.stores;
+      f.areas.forEach(a => tAreaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+      populateTrendStoreDropdown('');
+      tAreaSel.addEventListener('change', () => {
+        populateTrendStoreDropdown(tAreaSel.value);
+        reloadTrendChart();
+      });
+      tStoreSel.addEventListener('change', reloadTrendChart);
+
       psFiltersLoaded = true;
     } catch (e) { console.error('ps filter load failed', e); }
+  }
+
+  let psAllStores = [];
+  function populateTrendStoreDropdown(areaVal) {
+    const sel = document.getElementById('trendStoreFilter');
+    sel.innerHTML = '<option value="">All Stores</option>';
+    const list = areaVal
+      ? psAllStores.filter(s => (s.area || '').toLowerCase() === areaVal.toLowerCase())
+      : psAllStores;
+    list.forEach(s => sel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} - \${s.name}</option>\`);
+  }
+
+  async function reloadTrendChart() {
+    try {
+      const area  = document.getElementById('trendAreaFilter').value;
+      const store = document.getElementById('trendStoreFilter').value;
+      const params = new URLSearchParams();
+      if (area)  params.set('area', area);
+      if (store) params.set('storeId', store);
+      const res = await fetch('/api/trend?' + params.toString());
+      const j = await res.json();
+      if (!j.ok) return;
+      renderTrendChart(j.trendData);
+    } catch (e) { console.error('trend reload failed', e); }
+  }
+
+  function renderTrendChart(trendData) {
+    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
+      Chart.register(window.ChartDataLabels);
+      Chart._datalabelsRegistered = true;
+    }
+    if (psCharts.trend) { psCharts.trend.destroy(); psCharts.trend = null; }
+    const GREEN = '#1B5E20', YELLOW = '#FFC107';
+    const compactNum = v => {
+      const abs = Math.abs(v);
+      if (abs >= 1e9) return (v/1e9).toFixed(1) + 'B';
+      if (abs >= 1e6) return (v/1e6).toFixed(1) + 'M';
+      if (abs >= 1e3) return (v/1e3).toFixed(0) + 'K';
+      return Math.round(v).toString();
+    };
+    psCharts.trend = new Chart(document.getElementById('chartTrend'), {
+      type: 'line',
+      data: {
+        labels: trendData.map(d => d.month.substring(0,3)),
+        datasets: [
+          { label: 'Current', data: trendData.map(d => d.sC),
+            borderColor: GREEN, backgroundColor: 'rgba(27,94,32,0.1)',
+            borderWidth: 2.5, tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: GREEN,
+            yAxisID: 'y', datalabels: { display: false } },
+          { label: 'Year Ago', data: trendData.map(d => d.sY),
+            borderColor: YELLOW, backgroundColor: 'rgba(255,193,7,0.05)',
+            borderWidth: 2, tension: 0.3, borderDash: [5,4], pointRadius: 3, pointBackgroundColor: YELLOW,
+            yAxisID: 'y', datalabels: { display: false } },
+          { label: 'Growth %', data: trendData.map(d => d.growth === null ? null : d.growth),
+            type: 'line', borderColor: '#C62828', backgroundColor: '#C62828',
+            borderWidth: 2, tension: 0.3, pointRadius: 4, pointStyle: 'rectRot', pointBackgroundColor: '#C62828',
+            yAxisID: 'yGrowth',
+            datalabels: {
+              display: true, align: 'top', anchor: 'end', offset: 4,
+              color: ctx => (ctx.dataset.data[ctx.dataIndex] >= 0 ? '#2E7D32' : '#C62828'),
+              font: { size: 9, weight: 700 },
+              formatter: v => v === null ? '' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+            } }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { font: { size: 11 }, color: '#444' } },
+          datalabels: { display: false }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactNum(v) }, grid: { color: '#eee' } },
+          yGrowth: {
+            position: 'right', grid: { display: false },
+            ticks: { color: '#C62828', font: { size: 10 }, callback: v => v + '%' }
+          }
+        }
+      }
+    });
   }
 
   // Format helpers for Per Store table
@@ -3500,47 +3676,7 @@ const html = `<!DOCTYPE html>
     };
 
     // 1) Monthly Sales Trend (line) with Growth % overlay
-    psCharts.trend = new Chart(document.getElementById('chartTrend'), {
-      type: 'line',
-      data: {
-        labels: data.trendData.map(d => d.month.substring(0,3)),
-        datasets: [
-          { label: 'Current', data: data.trendData.map(d => d.sC),
-            borderColor: GREEN, backgroundColor: 'rgba(27,94,32,0.1)',
-            borderWidth: 2.5, tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: GREEN,
-            yAxisID: 'y', datalabels: { display: false } },
-          { label: 'Year Ago', data: data.trendData.map(d => d.sY),
-            borderColor: YELLOW, backgroundColor: 'rgba(255,193,7,0.05)',
-            borderWidth: 2, tension: 0.3, borderDash: [5,4], pointRadius: 3, pointBackgroundColor: YELLOW,
-            yAxisID: 'y', datalabels: { display: false } },
-          { label: 'Growth %', data: data.trendData.map(d => d.growth === null ? null : d.growth),
-            type: 'line', borderColor: '#C62828', backgroundColor: '#C62828',
-            borderWidth: 2, tension: 0.3, pointRadius: 4, pointStyle: 'rectRot', pointBackgroundColor: '#C62828',
-            yAxisID: 'yGrowth',
-            datalabels: {
-              display: true, align: 'top', anchor: 'end', offset: 4,
-              color: ctx => (ctx.dataset.data[ctx.dataIndex] >= 0 ? '#2E7D32' : '#C62828'),
-              font: { size: 9, weight: 700 },
-              formatter: v => v === null ? '' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
-            } }
-        ]
-      },
-      options: {
-        ...commonOpts,
-        plugins: {
-          ...commonOpts.plugins,
-          datalabels: { display: false }
-        },
-        scales: {
-          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } },
-          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactNum(v) }, grid: { color: '#eee' } },
-          yGrowth: {
-            position: 'right', grid: { display: false },
-            ticks: { color: '#C62828', font: { size: 10 }, callback: v => v + '%' }
-          }
-        }
-      }
-    });
+    renderTrendChart(data.trendData);
 
     // 2) Growth Per Area (bar)
     psCharts.area = new Chart(document.getElementById('chartAreaGrowth'), {
