@@ -1061,6 +1061,86 @@ app.get('/api/data', async (req, res) => {
     const unusualCurIdx = indexUnusual(unusualCurRows);
     const unusualYAIdx  = indexUnusual(unusualYARows);
 
+    // ----- MONTHLY DAILY SALES / TRX / BASKET BREAKDOWN (One Page BRT) -----
+    // Independent of the months filter - always broken out by calendar month,
+    // scoped to the selected area/store (and user's allowed scope).
+    const monthlySalesIdx = {}; // month -> {sC,sY,tC,tY}
+    salesRows.slice(1).forEach(cols => {
+      if (!cols[5] || cols[5].trim() === '') return;
+      const sid = (cols[3] || '').trim();
+      if (!sid) return;
+      if (!passArea(sid) || !passStoreScope(sid)) return;
+      if (storeId && sid !== storeId) return;
+      const month = (cols[0] || '').trim();
+      if (!MONTHS.includes(month)) return;
+      if (!monthlySalesIdx[month]) monthlySalesIdx[month] = emptyMetric();
+      monthlySalesIdx[month].sC += num(cols[5]);
+      monthlySalesIdx[month].sY += num(cols[6]);
+      monthlySalesIdx[month].tC += num(cols[12]);
+      monthlySalesIdx[month].tY += num(cols[14]);
+    });
+
+    const monthlyUnusualIdx = {}; // month -> {uC,uY}
+    function addMonthlyUnusual(rows, key) {
+      rows.slice(1).forEach(cols => {
+        if (!cols || cols.length < 7) return;
+        const rowArea = (cols[0] || '').trim();
+        if (area && rowArea.toLowerCase() !== area.toLowerCase()) return;
+        const sid = (cols[1] || '').trim();
+        if (!sid) return;
+        if (!passArea(sid) || !passStoreScope(sid)) return;
+        if (storeId && sid !== storeId) return;
+        const month = (cols[3] || '').trim();
+        if (!MONTHS.includes(month)) return;
+        if (!monthlyUnusualIdx[month]) monthlyUnusualIdx[month] = { uC: 0, uY: 0 };
+        monthlyUnusualIdx[month][key] += num(cols[6]);
+      });
+    }
+    addMonthlyUnusual(unusualCurRows, 'uC');
+    addMonthlyUnusual(unusualYARows, 'uY');
+
+    const nowDate = new Date();
+    const curYear = nowDate.getFullYear();
+    const yaYear  = curYear - 1;
+    const daysInMonth = (monthIdx, year) => new Date(year, monthIdx + 1, 0).getDate();
+
+    const monthlyBreakdown = MONTHS.map((m, i) => {
+      const s = monthlySalesIdx[m];
+      if (!s || s.sC === 0) {
+        return {
+          month: m, dailySales: null, netUnusual: null, dailySalesYA: null, netUnusualYA: null,
+          dailyTrx: null, dailyTrxYA: null, trxDiffVal: null,
+          dailyBasket: null, dailyBasketYA: null, basketDiffVal: null
+        };
+      }
+      const u = monthlyUnusualIdx[m] || { uC: 0, uY: 0 };
+      let curDays = daysInMonth(i, curYear);
+      let yaDays  = daysInMonth(i, yaYear);
+      if (i === 0) { curDays -= 1; yaDays -= 1; } // exclude Jan 1 - stores closed
+
+      const dailySales   = s.sC / curDays;
+      const dailySalesYA = s.sY / yaDays;
+      const netUnusual    = (s.sC - u.uC) / curDays;
+      const netUnusualYA  = (s.sY - u.uY) / yaDays;
+
+      const dailyTrx   = s.tC / curDays;
+      const dailyTrxYA = s.tY / yaDays;
+
+      const dailyBasket   = s.tC !== 0 ? s.sC / s.tC : 0;
+      const dailyBasketYA = s.tY !== 0 ? s.sY / s.tY : 0;
+
+      return {
+        month: m,
+        dailySales, netUnusual, dailySalesYA, netUnusualYA,
+        dailyTrx, dailyTrxYA, trxDiffVal: dailyTrx - dailyTrxYA,
+        dailyBasket, dailyBasketYA, basketDiffVal: dailyBasket - dailyBasketYA
+      };
+    });
+
+    let breakdownTitle = 'All Stores';
+    if (storeId) breakdownTitle = storeNameMap[storeId] || storeId;
+    else if (area) breakdownTitle = area;
+
     // ----- FAST AGGREGATION FROM INDEXES -----
     // Get metrics for one store, OR for many stores (aggregate)
     function getStoreSet(storeIdFilter) {
@@ -1143,7 +1223,9 @@ app.get('/api/data', async (req, res) => {
       green: agg.green,
       top200: agg.top200,
       unusual: agg.unusual,
-      perStore: perStore
+      perStore: perStore,
+      monthlyBreakdown: monthlyBreakdown,
+      breakdownTitle: breakdownTitle
     });
 
   } catch (err) {
@@ -1486,6 +1568,19 @@ const html = `<!DOCTYPE html>
   .summary-table .pos { color: #2E7D32; }
   .summary-table .neg { color: #C62828; }
   .summary-table .empty-cell { color: #c5cdc5; font-weight: 400; }
+
+  /* DAILY BREAKDOWN (Daily Sales / TRX / Basket Size) */
+  .breakdown-grid { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+  .breakdown-grid .table-card { flex: 1 1 320px; min-width: 280px; }
+  .breakdown-table { width: 100%; border-collapse: collapse; }
+  .breakdown-table thead .section-header td { font-size: 12px; font-weight: 700; padding: 9px 10px; }
+  .breakdown-table td { padding: 6px 8px; font-size: 11.5px; text-align: right; border-bottom: 1px solid #eef1ee; }
+  .breakdown-table td:first-child { text-align: left; font-weight: 600; color: #1B5E20; }
+  .breakdown-table tbody tr:nth-child(even) td { background: #fafbf9; }
+  .breakdown-table tbody tr:hover td { background: #FFF176; }
+  .breakdown-table .pos { color: #2E7D32; font-weight: 700; }
+  .breakdown-table .neg { color: #C62828; font-weight: 700; }
+  .breakdown-table .empty-cell { color: #c5cdc5; }
 
   /* ============ MOBILE RESPONSIVE ============ */
 
@@ -1974,6 +2069,53 @@ const html = `<!DOCTYPE html>
         <thead id="summaryHead"></thead>
         <tbody id="summaryBody"></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- DAILY SALES / TRX / BASKET SIZE BREAKDOWN -->
+  <div class="summary-header">
+    <h2>Daily Breakdown</h2>
+    <span class="summary-sub">Daily average by month · Net of Unusual excludes one-time transactions</span>
+  </div>
+  <div class="breakdown-grid">
+    <div class="table-card">
+      <div class="table-wrapper">
+        <table class="breakdown-table">
+          <thead>
+            <tr class="section-header"><td colspan="5" id="bdSalesTitle">Daily Sales</td></tr>
+            <tr class="col-header">
+              <td style="text-align:left;">Month</td><td>Daily Sales</td><td>Net of Unusual</td><td>Daily Sales YA</td><td>Net of Unusual YA</td>
+            </tr>
+          </thead>
+          <tbody id="bdSalesBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="table-card">
+      <div class="table-wrapper">
+        <table class="breakdown-table">
+          <thead>
+            <tr class="section-header"><td colspan="4" id="bdTrxTitle">TRX Count</td></tr>
+            <tr class="col-header">
+              <td style="text-align:left;">Month</td><td>Daily TRX</td><td>Daily TRX YA</td><td>Diff Val</td>
+            </tr>
+          </thead>
+          <tbody id="bdTrxBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="table-card">
+      <div class="table-wrapper">
+        <table class="breakdown-table">
+          <thead>
+            <tr class="section-header"><td colspan="4" id="bdBasketTitle">Basket Size</td></tr>
+            <tr class="col-header">
+              <td style="text-align:left;">Month</td><td>Daily B.S.</td><td>Daily B.S. YA</td><td>Diff Val</td>
+            </tr>
+          </thead>
+          <tbody id="bdBasketBody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -2702,6 +2844,51 @@ const html = `<!DOCTYPE html>
     }).join('');
   }
 
+  function fmtBd(v, dec) {
+    if (v === null || v === undefined || isNaN(v) || !isFinite(v)) return '<span class="empty-cell">-</span>';
+    return v.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  }
+
+  function buildBreakdownTables(data) {
+    const title = data.breakdownTitle || 'All Stores';
+    document.getElementById('bdSalesTitle').textContent  = title + ' Daily Sales';
+    document.getElementById('bdTrxTitle').textContent    = title + ' TRX Count';
+    document.getElementById('bdBasketTitle').textContent = title + ' Basket Size';
+
+    const rows = data.monthlyBreakdown || [];
+
+    document.getElementById('bdSalesBody').innerHTML = rows.map(r => \`
+      <tr>
+        <td>\${r.month}</td>
+        <td>\${fmtBd(r.dailySales, 2)}</td>
+        <td>\${fmtBd(r.netUnusual, 2)}</td>
+        <td>\${fmtBd(r.dailySalesYA, 2)}</td>
+        <td>\${fmtBd(r.netUnusualYA, 2)}</td>
+      </tr>\`).join('');
+
+    document.getElementById('bdTrxBody').innerHTML = rows.map(r => {
+      const cls = r.trxDiffVal === null ? '' : (r.trxDiffVal >= 0 ? 'pos' : 'neg');
+      return \`
+      <tr>
+        <td>\${r.month}</td>
+        <td>\${fmtBd(r.dailyTrx, 0)}</td>
+        <td>\${fmtBd(r.dailyTrxYA, 0)}</td>
+        <td class="\${cls}">\${fmtBd(r.trxDiffVal, 0)}</td>
+      </tr>\`;
+    }).join('');
+
+    document.getElementById('bdBasketBody').innerHTML = rows.map(r => {
+      const cls = r.basketDiffVal === null ? '' : (r.basketDiffVal >= 0 ? 'pos' : 'neg');
+      return \`
+      <tr>
+        <td>\${r.month}</td>
+        <td>\${fmtBd(r.dailyBasket, 0)}</td>
+        <td>\${fmtBd(r.dailyBasketYA, 0)}</td>
+        <td class="\${cls}">\${fmtBd(r.basketDiffVal, 0)}</td>
+      </tr>\`;
+    }).join('');
+  }
+
   window.sortSummary = function(colIdx) {
     if (summarySort.col === colIdx) {
       summarySort.asc = !summarySort.asc;
@@ -2737,6 +2924,7 @@ const html = `<!DOCTYPE html>
 
       buildTable(data);
       buildSummaryTable(data);
+      buildBreakdownTables(data);
 
       statusBar.className = 'status-bar';
       const f = data.filters || {};
