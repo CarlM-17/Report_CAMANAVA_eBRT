@@ -405,48 +405,6 @@ app.get('/api/store-performance', async (req, res) => {
   }
 });
 
-// Lightweight Monthly Sales Trend endpoint (area/store scoped) - used by the
-// inline filters inside the Per Store Sales Performance > Monthly Sales Trend chart.
-app.get('/api/trend', async (req, res) => {
-  try {
-    const scope = getUserScope(req);
-    const { area, storeId } = req.query;
-    const [salesRows, storeRows] = await Promise.all([
-      fetchSheet(SHEET_NAME),
-      fetchSheet('ListOfStores')
-    ]);
-    const storeAreaMap = {};
-    storeRows.slice(1).forEach(r => {
-      const sid = (r[3] || '').trim();
-      const ar  = (r[2] || '').trim();
-      if (sid) storeAreaMap[sid] = ar;
-    });
-    const monthly = {};
-    salesRows.slice(1).forEach(cols => {
-      if (!cols[5] && !cols[6]) return;
-      const sid = (cols[3] || '').trim();
-      const m   = (cols[0] || '').toString().trim();
-      if (!sid || !m) return;
-      const ar = storeAreaMap[sid] || '';
-      if (scope.areaSet  && !scope.areaSet.has(ar.toLowerCase())) return;
-      if (scope.storeSet && !scope.storeSet.has(sid)) return;
-      if (area    && ar.toLowerCase() !== area.toLowerCase()) return;
-      if (storeId && sid !== storeId) return;
-      if (!monthly[m]) monthly[m] = { sC: 0, sY: 0 };
-      monthly[m].sC += num(cols[5]);
-      monthly[m].sY += num(cols[6]);
-    });
-    const MONTHS_ORDER = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    const trendData = MONTHS_ORDER
-      .map(m => ({ month: m, sC: (monthly[m] || {}).sC || 0, sY: (monthly[m] || {}).sY || 0 }))
-      .filter(d => d.sC > 0 || d.sY > 0)
-      .map(d => ({ ...d, growth: d.sY !== 0 ? ((d.sC - d.sY) / Math.abs(d.sY)) * 100 : null }));
-    res.json({ ok: true, trendData });
-  } catch (err) {
-    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
-  }
-});
-
 // Category Sales endpoint - reads CategorySales sheet
 app.get('/api/category-sales', async (req, res) => {
   try {
@@ -575,7 +533,7 @@ app.get('/api/category-sales', async (req, res) => {
 
     // Sub-dept growth chart (8 top + 8 bottom by diff amount)
     const subDeptArray = Object.entries(bySubDept).map(([name, v]) => ({
-      subDept: name, diffAmount: v.sales - v.salesLY
+      subDept: name, category: v.category, diffAmount: v.sales - v.salesLY
     }));
     const topPos = subDeptArray.filter(s => s.diffAmount > 0).sort((a,b) => b.diffAmount - a.diffAmount).slice(0, 8);
     const topNeg = subDeptArray.filter(s => s.diffAmount < 0).sort((a,b) => a.diffAmount - b.diffAmount).slice(0, 8);
@@ -1103,109 +1061,6 @@ app.get('/api/data', async (req, res) => {
     const unusualCurIdx = indexUnusual(unusualCurRows);
     const unusualYAIdx  = indexUnusual(unusualYARows);
 
-    // ----- MONTHLY DAILY SALES / TRX / BASKET BREAKDOWN (One Page BRT) -----
-    // Independent of the months filter - always broken out by calendar month,
-    // scoped to the selected area/store (and user's allowed scope).
-    // Normalize any month spelling/case to canonical "January".."December".
-    // Accepts: "JAN", "Jan", "january", "JANUARY ", "Sept", "SEPT", etc.
-    const MONTH_LOOKUP = {};
-    MONTHS.forEach(m => {
-      const lc = m.toLowerCase();
-      MONTH_LOOKUP[lc] = m;
-      MONTH_LOOKUP[lc.slice(0, 3)] = m;            // jan, feb, ...
-      MONTH_LOOKUP[lc.slice(0, 4)] = m;            // janu, febr, marc, ...
-    });
-    MONTH_LOOKUP['sept'] = 'September';            // common alt spelling
-    const normMonth = (raw) => {
-      const k = (raw || '').toString().trim().toLowerCase().replace(/\./g, '');
-      return MONTH_LOOKUP[k] || null;
-    };
-
-    // Sales: when storeId is set, only that store; otherwise respect area+scope
-    const monthlySalesIdx = {}; // month -> {sC,sY,tC,tY}
-    salesRows.slice(1).forEach(cols => {
-      if (!cols[5] || cols[5].trim() === '') return;
-      const sid = (cols[3] || '').trim();
-      if (!sid) return;
-      if (storeId) {
-        if (sid !== storeId) return;
-      } else {
-        if (!passArea(sid) || !passStoreScope(sid)) return;
-      }
-      const month = normMonth(cols[0]);
-      if (!month) return;
-      if (!monthlySalesIdx[month]) monthlySalesIdx[month] = emptyMetric();
-      monthlySalesIdx[month].sC += num(cols[5]);
-      monthlySalesIdx[month].sY += num(cols[6]);
-      monthlySalesIdx[month].tC += num(cols[12]);
-      monthlySalesIdx[month].tY += num(cols[14]);
-    });
-
-    // Unusual: mirror existing indexUnusual filter (row's own area col, no storeAreaMap lookup)
-    const monthlyUnusualIdx = {}; // month -> {uC,uY}
-    function addMonthlyUnusual(rows, key) {
-      rows.slice(1).forEach(cols => {
-        if (!cols || cols.length < 7) return;
-        const rowArea = (cols[0] || '').trim();
-        if (area && rowArea.toLowerCase() !== area.toLowerCase()) return;
-        const sid = (cols[1] || '').trim();
-        if (!sid) return;
-        if (storeId) {
-          if (sid !== storeId) return;
-        } else {
-          if (!passStoreScope(sid)) return;
-        }
-        const month = normMonth(cols[3]);
-        if (!month) return;
-        if (!monthlyUnusualIdx[month]) monthlyUnusualIdx[month] = { uC: 0, uY: 0 };
-        monthlyUnusualIdx[month][key] += num(cols[6]);
-      });
-    }
-    addMonthlyUnusual(unusualCurRows, 'uC');
-    addMonthlyUnusual(unusualYARows, 'uY');
-
-    const nowDate = new Date();
-    const curYear = nowDate.getFullYear();
-    const yaYear  = curYear - 1;
-    const daysInMonth = (monthIdx, year) => new Date(year, monthIdx + 1, 0).getDate();
-
-    const monthlyBreakdown = MONTHS.map((m, i) => {
-      const s = monthlySalesIdx[m];
-      if (!s || s.sC === 0) {
-        return {
-          month: m, dailySales: null, netUnusual: null, dailySalesYA: null, netUnusualYA: null,
-          dailyTrx: null, dailyTrxYA: null, trxDiffVal: null,
-          dailyBasket: null, dailyBasketYA: null, basketDiffVal: null
-        };
-      }
-      const u = monthlyUnusualIdx[m] || { uC: 0, uY: 0 };
-      let curDays = daysInMonth(i, curYear);
-      let yaDays  = daysInMonth(i, yaYear);
-      if (i === 0) { curDays -= 1; yaDays -= 1; } // exclude Jan 1 - stores closed
-
-      const dailySales   = s.sC / curDays;
-      const dailySalesYA = s.sY / yaDays;
-      const netUnusual    = (s.sC - u.uC) / curDays;
-      const netUnusualYA  = (s.sY - u.uY) / yaDays;
-
-      const dailyTrx   = s.tC / curDays;
-      const dailyTrxYA = s.tY / yaDays;
-
-      const dailyBasket   = s.tC !== 0 ? s.sC / s.tC : 0;
-      const dailyBasketYA = s.tY !== 0 ? s.sY / s.tY : 0;
-
-      return {
-        month: m,
-        dailySales, netUnusual, dailySalesYA, netUnusualYA,
-        dailyTrx, dailyTrxYA, trxDiffVal: dailyTrx - dailyTrxYA,
-        dailyBasket, dailyBasketYA, basketDiffVal: dailyBasket - dailyBasketYA
-      };
-    });
-
-    let breakdownTitle = 'Region';
-    if (storeId) breakdownTitle = storeNameMap[storeId] || storeId;
-    else if (area) breakdownTitle = area;
-
     // ----- FAST AGGREGATION FROM INDEXES -----
     // Get metrics for one store, OR for many stores (aggregate)
     function getStoreSet(storeIdFilter) {
@@ -1288,266 +1143,11 @@ app.get('/api/data', async (req, res) => {
       green: agg.green,
       top200: agg.top200,
       unusual: agg.unusual,
-      perStore: perStore,
-      monthlyBreakdown: monthlyBreakdown,
-      breakdownTitle: breakdownTitle
+      perStore: perStore
     });
 
   } catch (err) {
     console.error('Fetch error:', err);
-    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
-  }
-});
-
-// Unusual Transactions endpoint - aggregates by Type (col H) and by Store
-app.get('/api/unusual', async (req, res) => {
-  const t0 = Date.now();
-  try {
-    const scope = getUserScope(req);
-    const { area, storeId } = req.query;
-    const monthsRaw = (req.query.months || req.query.month || '').toString();
-    const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
-    const monthSet = new Set(monthArr.map(m => m.toLowerCase()));
-    const hasMonthFilter = monthSet.size > 0;
-    const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
-
-    const [storeRows, unusualCurRows, unusualYARows] = await Promise.all([
-      fetchSheet('ListOfStores'),
-      fetchSheet('UnusualCurrent'),
-      fetchSheet('UnusualYearAgo')
-    ]);
-
-    const storeAreaMap = {};
-    const storeNameMap = {};
-    storeRows.slice(1).forEach(r => {
-      const sid = (r[3] || '').trim();
-      const ar  = (r[2] || '').trim();
-      const nm  = (r[4] || '').trim();
-      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
-    });
-
-    const passStoreScope = (sid) => !scope.storeSet || scope.storeSet.has(sid);
-    const passAreaScope  = (sid) => !scope.areaSet  || scope.areaSet.has((storeAreaMap[sid] || '').toLowerCase());
-
-    // Type normalization: case-insensitive + light fuzzy (strip punctuation/extra
-    // whitespace, fold common variants). The canonical display name is chosen as
-    // the most frequent original casing per normalized key.
-    const TYPE_ALIASES = {
-      'wtc': 'WTC Booking',
-      'wtcbooking': 'WTC Booking',
-      'wtc booking': 'WTC Booking',
-      'lgu': 'LGU',
-      'lgubooking': 'LGU Booking'
-    };
-    function normType(raw) {
-      const k = (raw || '').toString().trim().toLowerCase()
-        .replace(/[^a-z0-9 ]+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      return k;
-    }
-    function titleCase(k) {
-      return k.replace(/\b([a-z])/g, c => c.toUpperCase());
-    }
-
-    const byType  = {}; // normKey -> { cur, ya, displayCounts: {original: n} }
-    const byStore = {}; // sid     -> { cur, ya }
-
-    function ingest(rows, key) {
-      rows.slice(1).forEach(cols => {
-        if (!cols || cols.length < 8) return;
-        const rowArea = (cols[0] || '').trim();
-        if (area && rowArea.toLowerCase() !== area.toLowerCase()) return;
-        const sid = (cols[1] || '').trim();
-        if (!sid) return;
-        if (storeId) {
-          if (sid !== storeId) return;
-        } else {
-          if (!passAreaScope(sid) || !passStoreScope(sid)) return;
-        }
-        if (!passMonth(cols[3])) return;
-        const rawType = (cols[7] || '').trim() || 'Unspecified';
-        const nk = normType(rawType) || 'unspecified';
-        const amt = num(cols[6]);
-        if (!byType[nk]) byType[nk] = { cur: 0, ya: 0, displayCounts: {} };
-        byType[nk][key] += amt;
-        byType[nk].displayCounts[rawType] = (byType[nk].displayCounts[rawType] || 0) + 1;
-        if (!byStore[sid]) byStore[sid] = { cur: 0, ya: 0 };
-        byStore[sid][key] += amt;
-      });
-    }
-    ingest(unusualCurRows, 'cur');
-    ingest(unusualYARows,  'ya');
-
-    function pickDisplay(nk, counts) {
-      if (TYPE_ALIASES[nk]) return TYPE_ALIASES[nk];
-      let best = null, bestN = -1;
-      for (const [name, n] of Object.entries(counts)) {
-        if (n > bestN || (n === bestN && name.length > (best || '').length)) {
-          best = name; bestN = n;
-        }
-      }
-      return best || titleCase(nk);
-    }
-
-    const _diffPct = (c, y) => y !== 0 ? ((c - y) / Math.abs(y)) * 100 : (c !== 0 ? null : 0);
-    const _diffVal = (c, y) => c - y;
-
-    const types = Object.entries(byType).map(([nk, v]) => ({
-      type: pickDisplay(nk, v.displayCounts),
-      amount: v.cur, amountYA: v.ya,
-      diffPct: _diffPct(v.cur, v.ya), diffVal: _diffVal(v.cur, v.ya)
-    })).sort((a, b) => b.amount - a.amount);
-
-    const stores = Object.entries(byStore).map(([sid, v]) => ({
-      storeId: sid,
-      storeName: storeNameMap[sid] || sid,
-      area: storeAreaMap[sid] || '',
-      amount: v.cur, amountYA: v.ya,
-      diffPct: _diffPct(v.cur, v.ya), diffVal: _diffVal(v.cur, v.ya)
-    })).sort((a, b) => b.amount - a.amount);
-
-    const totCur = types.reduce((s, t) => s + t.amount,   0);
-    const totYA  = types.reduce((s, t) => s + t.amountYA, 0);
-
-    res.json({
-      ok: true,
-      filters: { area: area || null, storeId: storeId || null, months: monthArr },
-      total: { amount: totCur, amountYA: totYA, diffPct: _diffPct(totCur, totYA), diffVal: _diffVal(totCur, totYA) },
-      types, stores,
-      elapsedMs: Date.now() - t0
-    });
-  } catch (err) {
-    console.error('Unusual endpoint error:', err);
-    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
-  }
-});
-
-// Financial Performance endpoint - reads Financial sheet (YTD P&L per store)
-app.get('/api/financial', async (req, res) => {
-  try {
-    const scope = getUserScope(req);
-    const [rows, storeRows] = await Promise.all([
-      fetchSheet('Financial'),
-      fetchSheet('ListOfStores')
-    ]);
-    if (!rows || rows.length < 2) return res.json({ ok: true, stores: [], total: null });
-
-    // Build Store ID -> { area, name } from ListOfStores (col D = idx 3, col C = idx 2, col E = idx 4)
-    const storeAreaMap = {};
-    const storeNameMap = {};
-    storeRows.slice(1).forEach(r => {
-      const sid = (r[3] || '').toString().trim();
-      const ar  = (r[2] || '').toString().trim();
-      const nm  = (r[4] || '').toString().trim();
-      if (sid) { storeAreaMap[sid] = ar; storeNameMap[sid] = nm; }
-    });
-
-    // Money values for margins/opex/income/etc. are stored in thousands of pesos;
-    // multiply by 1000 to convert to actual pesos for display. POS Sales is already in pesos.
-    const K = 1000;
-
-    function parseRow(r) {
-      const code = (r[1] || '').toString().trim();
-      const rawName = (r[2] || '').toString().trim();
-      if (!rawName) return null;
-      const isTotal = rawName.toUpperCase().startsWith('TOTAL');
-      // Link to ListOfStores using Store Code (Financial col B) = Store ID (ListOfStores col D)
-      const linkedName = !isTotal ? (storeNameMap[code] || rawName) : rawName;
-      const area       = !isTotal ? (storeAreaMap[code] || '') : '';
-      const isMinimart = /^MINIMART/i.test(linkedName) || /^MINIMART/i.test(rawName);
-      return {
-        rank: parseInt(r[0]) || null,
-        storeCode: code,
-        storeName: linkedName,
-        area,
-        isTotal, isMinimart,
-        // POS Sales (actual pesos)
-        posSales:     num(r[3]),
-        posSalesYA:   num(r[4]),
-        posSalesDiff: num(r[5]),
-        posSalesPct:  num(r[6]),
-        // Front Margin (₱K)
-        frontMargin:    num(r[7])  * K,
-        frontMarginPct: num(r[8]),
-        frontMarginYA:    num(r[9]) * K,
-        frontMarginPctYA: num(r[10]),
-        // Back Margin (₱K)
-        backMargin:    num(r[13]) * K,
-        backMarginPct: num(r[14]),
-        backMarginYA:    num(r[15]) * K,
-        backMarginPctYA: num(r[16]),
-        // Store OPEX (₱K)
-        opex:    num(r[19]) * K,
-        opexPct: num(r[20]),
-        opexYA:    num(r[21]) * K,
-        opexPctYA: num(r[22]),
-        // Operating Income (₱K)
-        opIncome:    num(r[25]) * K,
-        opIncomePct: num(r[26]),
-        opIncomeYA:    num(r[27]) * K,
-        opIncomePctYA: num(r[28]),
-        // Rent Income (₱K)
-        rentIncome:    num(r[31]) * K,
-        rentIncomePct: num(r[32]),
-        rentIncomeYA:    num(r[33]) * K,
-        rentIncomePctYA: num(r[34]),
-        // NIAT (₱K)
-        niat:    num(r[37]) * K,
-        niatPct: num(r[38]),
-        niatYA:    num(r[39]) * K,
-        niatPctYA: num(r[40]),
-        // EBITDA (₱K)
-        ebitda:    num(r[43]) * K,
-        ebitdaPct: num(r[44]),
-        ebitdaYA:    num(r[45]) * K,
-        ebitdaPctYA: num(r[46]),
-        // Productivity
-        sellingArea:    num(r[49]),
-        salesPerSqm:    num(r[50]),
-        sellingAreaYA:  num(r[51]),
-        salesPerSqmYA:  num(r[52]),
-        hcDirect: num(r[53]), hcAgency: num(r[54]), hcTotal: num(r[55]),
-        revPerHcDirect: num(r[56]), revPerHcAgency: num(r[57]), revPerHcTotal: num(r[58]),
-        hcDirectYA: num(r[59]), hcAgencyYA: num(r[60]), hcTotalYA: num(r[61]),
-        revPerHcDirectYA: num(r[62]), revPerHcAgencyYA: num(r[63]), revPerHcTotalYA: num(r[64])
-      };
-    }
-
-    const all = rows.slice(1).map(parseRow).filter(Boolean);
-    const totalRow = all.find(r => r.isTotal) || null;
-    const stores   = all.filter(r => !r.isTotal);
-
-    // Apply user scope (area + store) — both reuse the same maps the rest of the app uses
-    const scoped = stores.filter(s => {
-      if (scope.areaSet  && !scope.areaSet.has((s.area || '').toLowerCase())) return false;
-      if (scope.storeSet && !scope.storeSet.has(s.storeCode)) return false;
-      return true;
-    });
-
-    // Build the area list available to this user (post-scope)
-    const availableAreas = [...new Set(scoped.map(s => s.area).filter(Boolean))].sort();
-
-    // Apply query filters
-    const typeFilter = (req.query.type || 'all').toLowerCase();
-    const areaFilter = (req.query.area || '').trim();
-    let filtered = scoped;
-    if (areaFilter) {
-      filtered = filtered.filter(s => s.area.toLowerCase() === areaFilter.toLowerCase());
-    }
-    if (typeFilter === 'full')      filtered = filtered.filter(s => !s.isMinimart);
-    else if (typeFilter === 'mini') filtered = filtered.filter(s =>  s.isMinimart);
-
-    res.json({
-      ok: true,
-      filters: { type: typeFilter, area: areaFilter || null },
-      availableAreas,
-      stores: filtered,
-      total: totalRow,
-      storeCount: filtered.length
-    });
-  } catch (err) {
-    console.error('Financial endpoint error:', err);
     res.status(err.statusCode || 500).json({ ok: false, error: err.message });
   }
 });
@@ -1887,21 +1487,6 @@ const html = `<!DOCTYPE html>
   .summary-table .neg { color: #C62828; }
   .summary-table .empty-cell { color: #c5cdc5; font-weight: 400; }
 
-  /* DAILY BREAKDOWN (Daily Sales / TRX / Basket Size) */
-  .breakdown-grid { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
-  .breakdown-grid .table-card { flex: 1 1 320px; min-width: 280px; }
-  table.breakdown-table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
-  .breakdown-table thead .section-header td { font-size: 11.5px; font-weight: 700; padding: 9px 6px; text-align: center; white-space: normal; }
-  .breakdown-table thead .col-header td { font-size: 9.5px; padding: 6px 4px; white-space: normal; line-height: 1.2; }
-  .breakdown-table td { padding: 5px 6px; font-size: 11px; text-align: right; border-bottom: 1px solid #eef1ee; overflow: hidden; text-overflow: ellipsis; }
-  .breakdown-table tbody td:first-child { text-align: left; font-weight: 600; color: #1B5E20; }
-  .breakdown-table tbody tr:nth-child(even) td { background: #fafbf9; }
-  .breakdown-table tbody tr:hover td { background: #FFF176; }
-  .breakdown-table .pos { color: #2E7D32; font-weight: 700; }
-  .breakdown-table .neg { color: #C62828; font-weight: 700; }
-  .breakdown-table .empty-cell { color: #c5cdc5; }
-  .breakdown-grid .table-wrapper { overflow-x: visible; }
-
   /* ============ MOBILE RESPONSIVE ============ */
 
   /* Tablet & smaller */
@@ -2095,36 +1680,6 @@ const html = `<!DOCTYPE html>
     display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
     margin-top: 16px;
   }
-  .charts-row-asym {
-    display: grid; grid-template-columns: 1.86fr 1fr; gap: 14px;
-    margin-top: 16px;
-  }
-  .chart-title-row {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; flex-wrap: wrap; margin-bottom: 8px;
-  }
-  .chart-title-row .chart-title { margin-bottom: 0; }
-  .chart-inline-filters {
-    display: flex; align-items: center; gap: 8px;
-  }
-  .chart-inline-filters label {
-    font-size: 10px; font-weight: 700; color: #1B5E20;
-    text-transform: uppercase; letter-spacing: 0.6px;
-  }
-  .chart-inline-filters select {
-    border: 1px solid #d4dad4; border-radius: 6px; padding: 4px 8px;
-    font-size: 11px; color: #1a2e1f; background: white; font-weight: 500;
-    max-width: 160px;
-  }
-  .chart-inline-filters select:hover { border-color: #2E7D32; }
-  .chart-inline-filters select:focus {
-    outline: none; border-color: #1B5E20;
-    box-shadow: 0 0 0 2px rgba(27,94,32,0.12);
-  }
-  @media (max-width: 900px) {
-    .charts-row-asym { grid-template-columns: 1fr; }
-    .chart-title-row { flex-direction: column; align-items: flex-start; }
-  }
   .chart-card {
     background: white; border-radius: 10px;
     border: 1px solid #e8ebe8; padding: 14px 16px;
@@ -2136,75 +1691,6 @@ const html = `<!DOCTYPE html>
   }
   .chart-wrap { position: relative; height: 260px; }
   .chart-wrap-tall { height: 340px; }
-
-  /* Financial Performance tab */
-  .fin-kpi-grid {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
-    margin-top: 14px;
-  }
-  @media (max-width: 1100px) { .fin-kpi-grid { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 600px)  { .fin-kpi-grid { grid-template-columns: 1fr; } }
-  .fin-kpi-grid .kpi-card {
-    background: white; border-radius: 10px; padding: 14px 16px;
-    border: 1px solid #e8ebe8; position: relative;
-  }
-  .fin-kpi-grid .kpi-label {
-    font-size: 10px; font-weight: 700; color: #5a6b5e;
-    letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px;
-  }
-  .fin-kpi-grid .kpi-value {
-    font-size: 20px; font-weight: 800; color: #1a2e1f; line-height: 1.1;
-  }
-  .fin-kpi-grid .kpi-sub {
-    font-size: 11px; color: #5a6b5e; margin-top: 5px; font-weight: 500;
-  }
-  .fin-kpi-grid .kpi-sub .pos { color: #2E7D32; font-weight: 700; }
-  .fin-kpi-grid .kpi-sub .neg { color: #C62828; font-weight: 700; }
-  .fin-kpi-grid .kpi-pct-badge {
-    display: inline-block; font-size: 10px; font-weight: 700;
-    padding: 2px 6px; border-radius: 4px; margin-left: 4px;
-  }
-  .fin-kpi-grid .kpi-pct-badge.pos { background: #E8F5E9; color: #2E7D32; }
-  .fin-kpi-grid .kpi-pct-badge.neg { background: #FFEBEE; color: #C62828; }
-
-  /* Financial tab glossary */
-  .fin-glossary {
-    background: white; border-radius: 10px; padding: 18px 20px;
-    border: 1px solid #e8ebe8;
-  }
-  .fin-glossary-title {
-    font-size: 14px; font-weight: 700; color: #1B5E20;
-    padding-left: 10px; border-left: 4px solid #FFC107;
-    margin-bottom: 14px; letter-spacing: 0.3px;
-  }
-  .fin-glossary-grid {
-    display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 20px;
-  }
-  @media (max-width: 800px) { .fin-glossary-grid { grid-template-columns: 1fr; } }
-  .fin-glossary-item {
-    padding: 8px 0; border-bottom: 1px solid #f0f2ef;
-  }
-  .fin-glossary-item:last-child { border-bottom: none; }
-  .fin-glossary-term {
-    font-size: 12px; font-weight: 700; color: #1B5E20;
-    margin-bottom: 3px; letter-spacing: 0.2px;
-  }
-  .fin-glossary-def {
-    font-size: 11.5px; color: #3d4a40; line-height: 1.5;
-  }
-  .fin-glossary-def em { color: #1B5E20; font-style: normal; font-weight: 600; }
-  .fin-glossary-note {
-    margin-top: 14px; padding: 10px 14px;
-    background: #F1F8E9; border-left: 3px solid #689F38; border-radius: 6px;
-    font-size: 11.5px; color: #1a2e1f; line-height: 1.5;
-  }
-  .fin-glossary-note strong { color: #1B5E20; }
-
-  /* Unusual Transactions tab */
-  .ut-row { display: flex; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
-  .ut-row .ut-type-card  { flex: 1 1 480px; min-width: 360px; }
-  .ut-row .ut-chart-card { flex: 1 1 420px; min-width: 320px; }
-  #utTypeTable, #utStoreTable { min-width: 0 !important; }
 
   @media (max-width: 900px) {
     .charts-grid { grid-template-columns: 1fr; }
@@ -2287,6 +1773,37 @@ const html = `<!DOCTYPE html>
   .variance-filters button:hover { border-color: #2E7D32; color: #1B5E20; }
   .variance-filters button.active {
     background: #1B5E20; color: white; border-color: #1B5E20;
+  }
+
+  /* Drill-through */
+  .drill-hint {
+    margin-left: auto; font-size: 10.5px; color: #94a094;
+    font-weight: 500; text-transform: none; letter-spacing: 0;
+  }
+  .drill-active {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+    font-size: 11px; font-weight: 700; color: #1B5E20;
+    background: #FFF8E1; border: 1px solid #FFC107;
+    padding: 4px 6px 4px 10px; border-radius: 20px;
+    text-transform: none; letter-spacing: 0;
+  }
+  .drill-active button {
+    background: #1B5E20; color: white; border: none;
+    border-radius: 12px; padding: 3px 9px; font-size: 10px;
+    font-weight: 700; cursor: pointer;
+  }
+  .drill-active button:hover { background: #C62828; }
+  #csCategoryTable tbody tr { cursor: pointer; }
+  #csCategoryTable tbody tr.drilled td {
+    background: #FFF9C4 !important;
+    box-shadow: inset 3px 0 0 #FFC107;
+  }
+  #csCategoryTable tbody tr.dimmed td { opacity: 0.45; }
+  .drill-tag {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    background: #FFC107; color: #1a2e1f; font-size: 9.5px; font-weight: 800;
+    letter-spacing: 0.4px; text-transform: uppercase; margin-left: 6px;
+    vertical-align: middle;
   }
 
   /* Category Sales tables (shared styling) */
@@ -2423,8 +1940,6 @@ const html = `<!DOCTYPE html>
   <button class="tab-btn" onclick="switchTab(this, 'monthly')">Per Store Sales Performance</button>
   <button class="tab-btn" onclick="switchTab(this, 'category')">Category Sales</button>
   <button class="tab-btn" onclick="switchTab(this, 'shopper')">Shopper Metrics</button>
-  <button class="tab-btn" onclick="switchTab(this, 'unusual')">Unusual Transactions</button>
-  <button class="tab-btn" onclick="switchTab(this, 'financial')">Financial Performance</button>
 </div>
 
 <!-- DAILY TAB -->
@@ -2493,62 +2008,6 @@ const html = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- DAILY SALES / TRX / BASKET SIZE BREAKDOWN -->
-  <div class="summary-header">
-    <h2>Daily Breakdown</h2>
-    <span class="summary-sub">Daily average by month · Net of Unusual excludes one-time transactions</span>
-  </div>
-  <div class="breakdown-grid">
-    <div class="table-card">
-      <div class="table-wrapper">
-        <table class="breakdown-table">
-          <colgroup>
-            <col style="width:22%"/><col style="width:20%"/><col style="width:20%"/><col style="width:19%"/><col style="width:19%"/>
-          </colgroup>
-          <thead>
-            <tr class="section-header"><td colspan="5" id="bdSalesTitle">Daily Sales</td></tr>
-            <tr class="col-header">
-              <td style="text-align:left;">Month</td><td>Daily Sales</td><td>Net of Unusual</td><td>Daily Sales YA</td><td>Net of Unusual YA</td>
-            </tr>
-          </thead>
-          <tbody id="bdSalesBody"></tbody>
-        </table>
-      </div>
-    </div>
-    <div class="table-card">
-      <div class="table-wrapper">
-        <table class="breakdown-table">
-          <colgroup>
-            <col style="width:28%"/><col style="width:24%"/><col style="width:24%"/><col style="width:24%"/>
-          </colgroup>
-          <thead>
-            <tr class="section-header"><td colspan="4" id="bdTrxTitle">TRX Count</td></tr>
-            <tr class="col-header">
-              <td style="text-align:left;">Month</td><td>Daily TRX</td><td>Daily TRX YA</td><td>Diff Val</td>
-            </tr>
-          </thead>
-          <tbody id="bdTrxBody"></tbody>
-        </table>
-      </div>
-    </div>
-    <div class="table-card">
-      <div class="table-wrapper">
-        <table class="breakdown-table">
-          <colgroup>
-            <col style="width:28%"/><col style="width:24%"/><col style="width:24%"/><col style="width:24%"/>
-          </colgroup>
-          <thead>
-            <tr class="section-header"><td colspan="4" id="bdBasketTitle">Basket Size</td></tr>
-            <tr class="col-header">
-              <td style="text-align:left;">Month</td><td>Daily B.S.</td><td>Daily B.S. YA</td><td>Diff Val</td>
-            </tr>
-          </thead>
-          <tbody id="bdBasketBody"></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
   <div class="footer" id="footerText">CAMANAVA Region · Data Source: Google Sheets</div>
 </div>
 
@@ -2595,26 +2054,16 @@ const html = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Charts row 1: wide trend (65%) + narrow area (35%) -->
-  <div class="charts-row-asym">
+  <!-- Charts grid (2x2) -->
+  <div class="charts-grid">
     <div class="chart-card">
-      <div class="chart-title-row">
-        <div class="chart-title">Monthly Sales Trend</div>
-        <div class="chart-inline-filters">
-          <label>Area</label>
-          <select id="trendAreaFilter"><option value="">All Areas</option></select>
-          <label>Store</label>
-          <select id="trendStoreFilter"><option value="">All Stores</option></select>
-        </div>
-      </div>
+      <div class="chart-title">Monthly Sales Trend</div>
       <div class="chart-wrap"><canvas id="chartTrend"></canvas></div>
     </div>
     <div class="chart-card">
       <div class="chart-title">Growth Per Area</div>
       <div class="chart-wrap"><canvas id="chartAreaGrowth"></canvas></div>
     </div>
-  </div>
-  <div class="charts-grid">
     <div class="chart-card">
       <div class="chart-title">Target Achievement per Store</div>
       <div class="chart-wrap chart-wrap-tall"><canvas id="chartTarget"></canvas></div>
@@ -2729,7 +2178,15 @@ const html = `<!DOCTYPE html>
 
   <!-- Category Summary Table -->
   <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Category Summary <span class="table-meta" id="csCategoryMeta"></span></div>
+    <div class="table-title-bar">
+      Category Summary
+      <span class="table-meta" id="csCategoryMeta"></span>
+      <span class="drill-hint" id="csDrillHint">Click a row to drill through</span>
+      <span class="drill-active" id="csDrillActive" style="display:none;">
+        <span id="csDrillLabel"></span>
+        <button onclick="csClearDrill()">✕ Clear</button>
+      </span>
+    </div>
     <div class="table-wrapper">
       <table class="cs-table" id="csCategoryTable">
         <thead><tr>
@@ -2927,270 +2384,6 @@ const html = `<!DOCTYPE html>
   <div class="chart-card" style="margin-top:8px;">
     <div class="chart-title">Share of Business (SOB) % per Store <span class="type-tag" id="smSobStoreTypeTag"></span></div>
     <div class="chart-wrap chart-wrap-tall"><canvas id="smChartSobStore"></canvas></div>
-  </div>
-
-</div>
-
-<!-- UNUSUAL TRANSACTIONS TAB -->
-<div id="tab-unusual" class="content" style="display:none;">
-
-  <div class="filter-bar">
-    <label>Month</label>
-    <div class="multi-select" id="utMsMonth">
-      <button type="button" class="ms-btn" onclick="toggleMs('utMsMonth')">All Months ▾</button>
-      <div class="ms-panel" id="utMsMonthPanel"></div>
-    </div>
-    <label>Area</label>
-    <select id="utAreaFilter"><option value="">All Areas</option></select>
-    <label>Store</label>
-    <select id="utStoreFilter"><option value="">All Stores</option></select>
-    <button class="btn-refresh" id="utRefreshBtn" onclick="loadUnusual()">↻ Refresh</button>
-  </div>
-
-  <div id="utStatusBar" class="status-bar loading">
-    <span class="spinner"></span> Loading unusual transactions...
-  </div>
-
-  <!-- Type table + chart row -->
-  <div class="ut-row">
-    <div class="table-card ut-type-card">
-      <div class="table-title-bar">By Type of Unusual</div>
-      <div class="table-wrapper">
-        <table class="cs-table" id="utTypeTable">
-          <thead><tr>
-            <th class="sortable" data-col="type">Type of Unusual</th>
-            <th class="sortable" data-col="amount">Amount</th>
-            <th class="sortable" data-col="amountYA">Amount YA</th>
-            <th class="sortable" data-col="diffPct">Diff %</th>
-            <th class="sortable" data-col="diffVal">Diff Value</th>
-          </tr></thead>
-          <tbody id="utTypeBody"></tbody>
-          <tfoot id="utTypeFoot"></tfoot>
-        </table>
-      </div>
-    </div>
-    <div class="chart-card ut-chart-card">
-      <div class="chart-title">Percentage Growth by Type</div>
-      <div class="chart-wrap chart-wrap-tall"><canvas id="utChartType"></canvas></div>
-    </div>
-  </div>
-
-  <!-- Per Store table -->
-  <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Per Store</div>
-    <div class="table-wrapper">
-      <table class="cs-table" id="utStoreTable">
-        <thead><tr>
-          <th class="sortable" data-col="storeId">Store ID</th>
-          <th class="sortable" data-col="storeName">Store Name</th>
-          <th class="sortable" data-col="area">Area</th>
-          <th class="sortable" data-col="amount">Amount</th>
-          <th class="sortable" data-col="amountYA">Amount YA</th>
-          <th class="sortable" data-col="diffPct">Diff %</th>
-          <th class="sortable" data-col="diffVal">Diff Value</th>
-        </tr></thead>
-        <tbody id="utStoreBody"></tbody>
-      </table>
-    </div>
-  </div>
-
-</div>
-
-<!-- FINANCIAL PERFORMANCE TAB -->
-<div id="tab-financial" class="content" style="display:none;">
-
-  <div class="filter-bar">
-    <label>Area</label>
-    <select id="finAreaFilter"><option value="">All Areas</option></select>
-    <label>Store Type</label>
-    <select id="finTypeFilter">
-      <option value="all">All Stores</option>
-      <option value="full">Full Stores Only</option>
-      <option value="mini">Minimarts Only</option>
-    </select>
-    <button class="btn-refresh" id="finRefreshBtn" onclick="loadFinancial()">↻ Refresh</button>
-  </div>
-
-  <div id="finStatusBar" class="status-bar loading">
-    <span class="spinner"></span> Loading financial data...
-  </div>
-
-  <!-- KPI cards: P&L cascade -->
-  <div class="fin-kpi-grid">
-    <div class="kpi-card" id="finKpiSales"></div>
-    <div class="kpi-card" id="finKpiFrontMargin"></div>
-    <div class="kpi-card" id="finKpiBackMargin"></div>
-    <div class="kpi-card" id="finKpiOpex"></div>
-    <div class="kpi-card" id="finKpiOpIncome"></div>
-    <div class="kpi-card" id="finKpiNiat"></div>
-    <div class="kpi-card" id="finKpiEbitda"></div>
-    <div class="kpi-card" id="finKpiSalesPerSqm"></div>
-  </div>
-
-  <!-- P&L Waterfall + Margin breakdown -->
-  <div class="ut-row" style="margin-top:14px;">
-    <div class="chart-card" style="flex:1 1 480px;">
-      <div class="chart-title">P&L Waterfall · Region Total (YTD)</div>
-      <div class="chart-wrap"><canvas id="finChartWaterfall"></canvas></div>
-    </div>
-    <div class="chart-card" style="flex:1 1 420px;">
-      <div class="chart-title">Margin Structure (% to Sales) · Region</div>
-      <div class="chart-wrap"><canvas id="finChartMarginStruct"></canvas></div>
-    </div>
-  </div>
-
-  <!-- Per-store charts -->
-  <div class="charts-grid">
-    <div class="chart-card">
-      <div class="chart-title">Sales Growth % per Store</div>
-      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartSalesGrowth"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">NIAT Margin % per Store</div>
-      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartNiat"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">EBITDA Margin % per Store</div>
-      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartEbitda"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">Monthly Sales per SQM · Current vs YA</div>
-      <div class="chart-wrap chart-wrap-tall"><canvas id="finChartSqm"></canvas></div>
-    </div>
-  </div>
-
-  <!-- P&L Table -->
-  <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Store P&L (YTD 2026 vs YTD 2025) <span class="type-tag" id="finPlTag"></span></div>
-    <div class="table-wrapper">
-      <table class="cs-table" id="finPlTable">
-        <thead><tr>
-          <th class="sortable" data-col="rank">#</th>
-          <th class="sortable" data-col="storeName">Store</th>
-          <th class="sortable" data-col="area">Area</th>
-          <th class="sortable" data-col="posSales">POS Sales</th>
-          <th class="sortable" data-col="posSalesYA">Sales YA</th>
-          <th class="sortable" data-col="posSalesPct">Growth %</th>
-          <th class="sortable" data-col="frontMarginPct">Front Margin %</th>
-          <th class="sortable" data-col="backMarginPct">Back Margin %</th>
-          <th class="sortable" data-col="opexPct">OPEX %</th>
-          <th class="sortable" data-col="opIncome">Op. Income</th>
-          <th class="sortable" data-col="opIncomePct">Op. Inc. %</th>
-          <th class="sortable" data-col="niat">NIAT</th>
-          <th class="sortable" data-col="niatPct">NIAT %</th>
-          <th class="sortable" data-col="ebitda">EBITDA</th>
-          <th class="sortable" data-col="ebitdaPct">EBITDA %</th>
-        </tr></thead>
-        <tbody id="finPlBody"></tbody>
-        <tfoot id="finPlFoot"></tfoot>
-      </table>
-    </div>
-  </div>
-
-  <!-- Productivity Table -->
-  <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Productivity · Sales per SQM and Headcount</div>
-    <div class="table-wrapper">
-      <table class="cs-table" id="finProdTable">
-        <thead><tr>
-          <th class="sortable" data-col="storeName">Store</th>
-          <th class="sortable" data-col="area">Area</th>
-          <th class="sortable" data-col="sellingArea">Selling Area (SQM)</th>
-          <th class="sortable" data-col="salesPerSqm">Mo. Sales/SQM</th>
-          <th class="sortable" data-col="salesPerSqmYA">Mo. Sales/SQM YA</th>
-          <th class="sortable" data-col="sqmGrowth">Sales/SQM Growth %</th>
-          <th class="sortable" data-col="hcTotal">HC Total</th>
-          <th class="sortable" data-col="hcTotalYA">HC Total YA</th>
-          <th class="sortable" data-col="revPerHcTotal">Revenue / HC</th>
-          <th class="sortable" data-col="revPerHcTotalYA">Revenue / HC YA</th>
-          <th class="sortable" data-col="revPerHcGrowth">Revenue / HC Growth %</th>
-        </tr></thead>
-        <tbody id="finProdBody"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Glossary - explanations at the bottom of the tab -->
-  <div class="fin-glossary" style="margin-top:14px;">
-    <div class="fin-glossary-title">📘 Glossary · What do these numbers mean?</div>
-    <div class="fin-glossary-grid">
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">POS Sales</div>
-        <div class="fin-glossary-def">Total revenue rung up at the register over the period (YTD). The "top line."</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Growth %</div>
-        <div class="fin-glossary-def">POS Sales vs the same period last year, expressed as a percentage. Positive = growing.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Front Margin</div>
-        <div class="fin-glossary-def">Sales minus Cost of Goods Sold (COGS). The retail markup the store earns before any expenses.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Back Margin</div>
-        <div class="fin-glossary-def">Income from suppliers (rebates, listing fees, promo support, volume discounts). Adds to gross margin.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Store OPEX</div>
-        <div class="fin-glossary-def">Operating Expenses — day-to-day cost of running the store: rent, salaries, utilities, supplies, etc.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Operating Income</div>
-        <div class="fin-glossary-def">(Front Margin + Back Margin) − OPEX. The profit from the store's core retail operation.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Rent Income</div>
-        <div class="fin-glossary-def">Money earned from leasing space inside the store to other tenants (kiosks, food stalls, ATMs).</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">NIAT</div>
-        <div class="fin-glossary-def">Net Income After Tax — the bottom line. What's left after all expenses, other income, and taxes.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">EBITDA</div>
-        <div class="fin-glossary-def">Earnings Before Interest, Tax, Depreciation &amp; Amortization. A cash-earnings proxy that strips out non-cash and financing items, so stores are easier to compare.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">% to Sales</div>
-        <div class="fin-glossary-def">Any line item divided by POS Sales. Tells you how big each cost or profit is <em>relative to</em> the size of the store. Better for comparing stores of different sizes than raw peso amounts.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Selling Area (SQM)</div>
-        <div class="fin-glossary-def">Square meters of floor space used for selling. Used to gauge how productive each square meter is.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Mo. Sales / SQM</div>
-        <div class="fin-glossary-def">Average monthly sales per square meter of selling area. A productivity benchmark — higher means the store extracts more value from its footprint.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Headcount (Direct / Agency / Total)</div>
-        <div class="fin-glossary-def">Direct = company employees. Agency = contracted/outsourced workers. Total = combined.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Revenue / HC</div>
-        <div class="fin-glossary-def">Total revenue ÷ total headcount. Measures workforce productivity — how much sales each person on payroll generates.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">Revenue / HC Growth %</div>
-        <div class="fin-glossary-def">Year-over-year change in workforce productivity. Rising = each employee is generating more sales than last year.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">YA (Year Ago)</div>
-        <div class="fin-glossary-def">Same line item from the same period last year — the comparison baseline for all growth metrics.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">YTD</div>
-        <div class="fin-glossary-def">Year-To-Date. Cumulative total from January 1 through the latest reported month of the current year.</div>
-      </div>
-      <div class="fin-glossary-item">
-        <div class="fin-glossary-term">P&amp;L (Profit &amp; Loss)</div>
-        <div class="fin-glossary-def">A standard financial statement that walks from Sales at the top down to NIAT at the bottom, showing where the money goes at each step. Also called the Income Statement.</div>
-      </div>
-    </div>
-    <div class="fin-glossary-note">
-      💡 <strong>Reading the P&amp;L cascade:</strong> Start with POS Sales. Add Front + Back Margin (gross profit). Subtract OPEX → Operating Income.
-      Add Rent Income, subtract tax → NIAT (bottom line). The Waterfall chart at the top visualizes this step-by-step.
-    </div>
   </div>
 
 </div>
@@ -3548,51 +2741,6 @@ const html = `<!DOCTYPE html>
     }).join('');
   }
 
-  function fmtBd(v, dec) {
-    if (v === null || v === undefined || isNaN(v) || !isFinite(v)) return '<span class="empty-cell">-</span>';
-    return v.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
-  }
-
-  function buildBreakdownTables(data) {
-    const title = data.breakdownTitle || 'All Stores';
-    document.getElementById('bdSalesTitle').textContent  = title + ' Daily Sales';
-    document.getElementById('bdTrxTitle').textContent    = title + ' Transaction Count';
-    document.getElementById('bdBasketTitle').textContent = title + ' Basket Size';
-
-    const rows = data.monthlyBreakdown || [];
-
-    document.getElementById('bdSalesBody').innerHTML = rows.map(r => \`
-      <tr>
-        <td>\${r.month}</td>
-        <td>\${fmtBd(r.dailySales, 2)}</td>
-        <td>\${fmtBd(r.netUnusual, 2)}</td>
-        <td>\${fmtBd(r.dailySalesYA, 2)}</td>
-        <td>\${fmtBd(r.netUnusualYA, 2)}</td>
-      </tr>\`).join('');
-
-    document.getElementById('bdTrxBody').innerHTML = rows.map(r => {
-      const cls = r.trxDiffVal === null ? '' : (r.trxDiffVal >= 0 ? 'pos' : 'neg');
-      return \`
-      <tr>
-        <td>\${r.month}</td>
-        <td>\${fmtBd(r.dailyTrx, 0)}</td>
-        <td>\${fmtBd(r.dailyTrxYA, 0)}</td>
-        <td class="\${cls}">\${fmtBd(r.trxDiffVal, 0)}</td>
-      </tr>\`;
-    }).join('');
-
-    document.getElementById('bdBasketBody').innerHTML = rows.map(r => {
-      const cls = r.basketDiffVal === null ? '' : (r.basketDiffVal >= 0 ? 'pos' : 'neg');
-      return \`
-      <tr>
-        <td>\${r.month}</td>
-        <td>\${fmtBd(r.dailyBasket, 0)}</td>
-        <td>\${fmtBd(r.dailyBasketYA, 0)}</td>
-        <td class="\${cls}">\${fmtBd(r.basketDiffVal, 0)}</td>
-      </tr>\`;
-    }).join('');
-  }
-
   window.sortSummary = function(colIdx) {
     if (summarySort.col === colIdx) {
       summarySort.asc = !summarySort.asc;
@@ -3628,7 +2776,6 @@ const html = `<!DOCTYPE html>
 
       buildTable(data);
       buildSummaryTable(data);
-      buildBreakdownTables(data);
 
       statusBar.className = 'status-bar';
       const f = data.filters || {};
@@ -3684,7 +2831,6 @@ const html = `<!DOCTYPE html>
                    : id === 'psMsMonth' ? loadStorePerf
                    : (id === 'csMsMonth' || id === 'csMsCategory') ? loadCategorySales
                    : id === 'smMsMonth' ? loadShopperMetrics
-                   : id === 'utMsMonth' ? loadUnusual
                    : null;
     const actions = \`
       <div class="ms-actions">
@@ -3772,102 +2918,8 @@ const html = `<!DOCTYPE html>
       const areaSel  = document.getElementById('psAreaFilter');
       f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
       areaSel.addEventListener('change', loadStorePerf);
-
-      // Inline trend chart filters (separate from tab-wide filters)
-      const tAreaSel  = document.getElementById('trendAreaFilter');
-      const tStoreSel = document.getElementById('trendStoreFilter');
-      psAllStores = f.stores;
-      f.areas.forEach(a => tAreaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
-      populateTrendStoreDropdown('');
-      tAreaSel.addEventListener('change', () => {
-        populateTrendStoreDropdown(tAreaSel.value);
-        reloadTrendChart();
-      });
-      tStoreSel.addEventListener('change', reloadTrendChart);
-
       psFiltersLoaded = true;
     } catch (e) { console.error('ps filter load failed', e); }
-  }
-
-  let psAllStores = [];
-  function populateTrendStoreDropdown(areaVal) {
-    const sel = document.getElementById('trendStoreFilter');
-    sel.innerHTML = '<option value="">All Stores</option>';
-    const list = areaVal
-      ? psAllStores.filter(s => (s.area || '').toLowerCase() === areaVal.toLowerCase())
-      : psAllStores;
-    list.forEach(s => sel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} - \${s.name}</option>\`);
-  }
-
-  async function reloadTrendChart() {
-    try {
-      const area  = document.getElementById('trendAreaFilter').value;
-      const store = document.getElementById('trendStoreFilter').value;
-      const params = new URLSearchParams();
-      if (area)  params.set('area', area);
-      if (store) params.set('storeId', store);
-      const res = await fetch('/api/trend?' + params.toString());
-      const j = await res.json();
-      if (!j.ok) return;
-      renderTrendChart(j.trendData);
-    } catch (e) { console.error('trend reload failed', e); }
-  }
-
-  function renderTrendChart(trendData) {
-    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
-      Chart.register(window.ChartDataLabels);
-      Chart._datalabelsRegistered = true;
-    }
-    if (psCharts.trend) { psCharts.trend.destroy(); psCharts.trend = null; }
-    const GREEN = '#1B5E20', YELLOW = '#FFC107';
-    const compactNum = v => {
-      const abs = Math.abs(v);
-      if (abs >= 1e9) return (v/1e9).toFixed(1) + 'B';
-      if (abs >= 1e6) return (v/1e6).toFixed(1) + 'M';
-      if (abs >= 1e3) return (v/1e3).toFixed(0) + 'K';
-      return Math.round(v).toString();
-    };
-    psCharts.trend = new Chart(document.getElementById('chartTrend'), {
-      type: 'line',
-      data: {
-        labels: trendData.map(d => d.month.substring(0,3)),
-        datasets: [
-          { label: 'Current', data: trendData.map(d => d.sC),
-            borderColor: GREEN, backgroundColor: 'rgba(27,94,32,0.1)',
-            borderWidth: 2.5, tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: GREEN,
-            yAxisID: 'y', datalabels: { display: false } },
-          { label: 'Year Ago', data: trendData.map(d => d.sY),
-            borderColor: YELLOW, backgroundColor: 'rgba(255,193,7,0.05)',
-            borderWidth: 2, tension: 0.3, borderDash: [5,4], pointRadius: 3, pointBackgroundColor: YELLOW,
-            yAxisID: 'y', datalabels: { display: false } },
-          { label: 'Growth %', data: trendData.map(d => d.growth === null ? null : d.growth),
-            type: 'line', borderColor: '#C62828', backgroundColor: '#C62828',
-            borderWidth: 2, tension: 0.3, pointRadius: 4, pointStyle: 'rectRot', pointBackgroundColor: '#C62828',
-            yAxisID: 'yGrowth',
-            datalabels: {
-              display: true, align: 'top', anchor: 'end', offset: 4,
-              color: ctx => (ctx.dataset.data[ctx.dataIndex] >= 0 ? '#2E7D32' : '#C62828'),
-              font: { size: 9, weight: 700 },
-              formatter: v => v === null ? '' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
-            } }
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: {
-          legend: { labels: { font: { size: 11 }, color: '#444' } },
-          datalabels: { display: false }
-        },
-        scales: {
-          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } },
-          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactNum(v) }, grid: { color: '#eee' } },
-          yGrowth: {
-            position: 'right', grid: { display: false },
-            ticks: { color: '#C62828', font: { size: 10 }, callback: v => v + '%' }
-          }
-        }
-      }
-    });
   }
 
   // Format helpers for Per Store table
@@ -4068,7 +3120,47 @@ const html = `<!DOCTYPE html>
     };
 
     // 1) Monthly Sales Trend (line) with Growth % overlay
-    renderTrendChart(data.trendData);
+    psCharts.trend = new Chart(document.getElementById('chartTrend'), {
+      type: 'line',
+      data: {
+        labels: data.trendData.map(d => d.month.substring(0,3)),
+        datasets: [
+          { label: 'Current', data: data.trendData.map(d => d.sC),
+            borderColor: GREEN, backgroundColor: 'rgba(27,94,32,0.1)',
+            borderWidth: 2.5, tension: 0.3, fill: true, pointRadius: 4, pointBackgroundColor: GREEN,
+            yAxisID: 'y', datalabels: { display: false } },
+          { label: 'Year Ago', data: data.trendData.map(d => d.sY),
+            borderColor: YELLOW, backgroundColor: 'rgba(255,193,7,0.05)',
+            borderWidth: 2, tension: 0.3, borderDash: [5,4], pointRadius: 3, pointBackgroundColor: YELLOW,
+            yAxisID: 'y', datalabels: { display: false } },
+          { label: 'Growth %', data: data.trendData.map(d => d.growth === null ? null : d.growth),
+            type: 'line', borderColor: '#C62828', backgroundColor: '#C62828',
+            borderWidth: 2, tension: 0.3, pointRadius: 4, pointStyle: 'rectRot', pointBackgroundColor: '#C62828',
+            yAxisID: 'yGrowth',
+            datalabels: {
+              display: true, align: 'top', anchor: 'end', offset: 4,
+              color: ctx => (ctx.dataset.data[ctx.dataIndex] >= 0 ? '#2E7D32' : '#C62828'),
+              font: { size: 9, weight: 700 },
+              formatter: v => v === null ? '' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+            } }
+        ]
+      },
+      options: {
+        ...commonOpts,
+        plugins: {
+          ...commonOpts.plugins,
+          datalabels: { display: false }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactNum(v) }, grid: { color: '#eee' } },
+          yGrowth: {
+            position: 'right', grid: { display: false },
+            ticks: { color: '#C62828', font: { size: 10 }, callback: v => v + '%' }
+          }
+        }
+      }
+    });
 
     // 2) Growth Per Area (bar)
     psCharts.area = new Chart(document.getElementById('chartAreaGrowth'), {
@@ -4412,17 +3504,7 @@ const html = `<!DOCTYPE html>
       smFirstLoad = true;
       loadSmFilters().then(() => loadShopperMetrics());
     }
-    if (tabId === 'unusual' && !utFirstLoad) {
-      utFirstLoad = true;
-      loadUtFilters().then(() => loadUnusual());
-    }
-    if (tabId === 'financial' && !finFirstLoad) {
-      finFirstLoad = true;
-      loadFinancial();
-    }
   };
-  let utFirstLoad = false;
-  let finFirstLoad = false;
 
   // ============ CATEGORY SALES ============
   const CAT_COLORS = {
@@ -4441,6 +3523,7 @@ const html = `<!DOCTYPE html>
   let csCharts = { catDiff: null, sob: null, subDept: null };
   let csCurrentData = null;
   let csVarianceFilter = 'all';
+  let csDrillCategory = null;   // drill-through: category selected from summary table
   let csSubDeptsByCategory = null;   // { catName: [subDepts...] }
   let csAllSubDepts = null;          // full list (when no category bd filter)
   let csSorts = {
@@ -4578,6 +3661,7 @@ const html = `<!DOCTYPE html>
       renderCsDetailTable();
       renderCsAreaTable();
       renderCsStoreTable();
+      csUpdateDrillBanner();
 
       status.className = 'status-bar';
       const parts = [];
@@ -4636,7 +3720,10 @@ const html = `<!DOCTYPE html>
     document.getElementById('csCategoryBody').innerHTML = rows.map(r => {
       const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
       const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
-      return \`<tr>
+      const drillCls = csDrillCategory
+        ? (r.name === csDrillCategory ? 'drilled' : 'dimmed')
+        : '';
+      return \`<tr class="\${drillCls}" data-category="\${r.name}">
         <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.name)}">\${r.name}</span></td>
         <td>\${csFmt(r.sales)}</td>
         <td>\${csFmt(r.salesLY)}</td>
@@ -4663,6 +3750,8 @@ const html = `<!DOCTYPE html>
   function renderCsDetailTable() {
     if (!csCurrentData) return;
     let rows = csCurrentData.subDeptDetail.slice();
+    // Drill-through filter (from Category Summary row click)
+    if (csDrillCategory) rows = rows.filter(r => r.category === csDrillCategory);
     if (csVarianceFilter === 'positive') rows = rows.filter(r => r.diffAmount > 0);
     else if (csVarianceFilter === 'negative') rows = rows.filter(r => r.diffAmount < 0);
     rows = csSort(rows, csSorts.detail.col, csSorts.detail.asc);
@@ -4723,6 +3812,64 @@ const html = `<!DOCTYPE html>
       </tr>\`;
     }).join('');
   }
+
+  // ----- Drill-through from Category Summary -----
+  function csUpdateDrillBanner() {
+    const hint   = document.getElementById('csDrillHint');
+    const active = document.getElementById('csDrillActive');
+    const label  = document.getElementById('csDrillLabel');
+    if (csDrillCategory) {
+      hint.style.display = 'none';
+      active.style.display = 'flex';
+      label.textContent = 'Drilled into: ' + csDrillCategory;
+    } else {
+      hint.style.display = 'block';
+      active.style.display = 'none';
+    }
+    // Tag the downstream table titles
+    document.querySelectorAll('.drill-tag').forEach(el => el.remove());
+    if (csDrillCategory) {
+      ['csDetailTable','csAreaTable','csStoreTable'].forEach(tid => {
+        const card = document.getElementById(tid).closest('.table-card');
+        const bar = card && card.querySelector('.table-title-bar');
+        if (bar && !bar.querySelector('.drill-tag')) {
+          const tag = document.createElement('span');
+          tag.className = 'drill-tag';
+          tag.textContent = csDrillCategory;
+          bar.insertBefore(tag, bar.querySelector('.variance-filters') || null);
+        }
+      });
+    }
+  }
+
+  function csSetDrill(category) {
+    csDrillCategory = (csDrillCategory === category) ? null : category;
+    // Sync the Area & Store breakdown Category dropdown so backend filters those tables
+    const bdc = document.getElementById('csBdCategory');
+    if (bdc) {
+      bdc.value = csDrillCategory || '';
+      csRebuildSubDeptDropdown();
+    }
+    csUpdateDrillBanner();
+    loadCategorySales();   // re-fetch so Area + Store tables reflect the drill
+  }
+
+  function csClearDrill() {
+    csDrillCategory = null;
+    const bdc = document.getElementById('csBdCategory');
+    if (bdc) { bdc.value = ''; csRebuildSubDeptDropdown(); }
+    csUpdateDrillBanner();
+    loadCategorySales();
+  }
+  window.csClearDrill = csClearDrill;
+
+  // Row click -> drill
+  document.addEventListener('click', (e) => {
+    const tr = e.target.closest('#csCategoryTable tbody tr');
+    if (!tr || !csCurrentData) return;
+    const cat = tr.dataset.category;
+    if (cat) csSetDrill(cat);
+  });
 
   // Sort click handler for all category sales tables
   document.addEventListener('click', (e) => {
@@ -4813,7 +3960,9 @@ const html = `<!DOCTYPE html>
     });
 
     // 3) Top & Bottom Sub-Departments (horizontal bar)
-    const sg = data.subDeptGrowth;
+    const sg = csDrillCategory
+      ? data.subDeptGrowth.filter(s => s.category === csDrillCategory)
+      : data.subDeptGrowth;
     csCharts.subDept = new Chart(document.getElementById('chartSubDeptGrowth'), {
       type: 'bar',
       data: {
@@ -5323,590 +4472,6 @@ const html = `<!DOCTYPE html>
     await loadFilters();
     loadData();
   })();
-
-  // ============ UNUSUAL TRANSACTIONS TAB ============
-  let utFiltersLoaded = false;
-  let utData = { types: [], stores: [], total: null };
-  let utChart = null;
-  let utTypeSort  = { col: 'amount', asc: false };
-  let utStoreSort = { col: 'amount', asc: false };
-
-  async function loadUtFilters() {
-    if (utFiltersLoaded) return;
-    try {
-      const res = await fetch('/api/filters');
-      const f = await res.json();
-      if (!f.ok) return;
-      buildMsPanel('utMsMonth', f.months, 'All Months');
-      const areaSel = document.getElementById('utAreaFilter');
-      f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
-      const storeSel = document.getElementById('utStoreFilter');
-      f.stores.forEach(s => storeSel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} - \${s.name}</option>\`);
-      areaSel.addEventListener('change', loadUnusual);
-      storeSel.addEventListener('change', loadUnusual);
-      utFiltersLoaded = true;
-    } catch (e) { console.error('ut filter load failed', e); }
-  }
-
-  async function loadUnusual() {
-    const btn = document.getElementById('utRefreshBtn');
-    const status = document.getElementById('utStatusBar');
-    btn.classList.add('loading'); btn.textContent = '⏳ Loading...';
-    status.className = 'status-bar loading';
-    status.innerHTML = '<span class="spinner"></span> Loading unusual transactions...';
-    try {
-      const months = getMsValues('utMsMonth');
-      const areaV  = document.getElementById('utAreaFilter').value;
-      const storeV = document.getElementById('utStoreFilter').value;
-      const params = new URLSearchParams();
-      if (months.length) params.set('months', months.join(','));
-      if (areaV)  params.set('area', areaV);
-      if (storeV) params.set('storeId', storeV);
-      const res = await fetch('/api/unusual?' + params.toString());
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'Unknown error');
-      utData = data;
-      renderUtTypeTable();
-      renderUtStoreTable();
-      renderUtChart();
-      status.className = 'status-bar';
-      status.innerHTML = \`✅ \${data.types.length} types · \${data.stores.length} stores · Total ₱\${fmtNum(data.total.amount)} (YA ₱\${fmtNum(data.total.amountYA)})\`;
-    } catch (err) {
-      status.className = 'status-bar error';
-      status.innerHTML = '❌ Error: ' + err.message;
-    } finally {
-      btn.classList.remove('loading');
-      btn.textContent = '↻ Refresh';
-    }
-  }
-
-  function fmtNum(v) {
-    if (v === null || v === undefined || !isFinite(v)) return '-';
-    return Math.round(v).toLocaleString('en-US');
-  }
-  function fmtPct(v) {
-    if (v === null || v === undefined || !isFinite(v)) return '-';
-    return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
-  }
-
-  function sortRows(rows, sort) {
-    if (!sort.col) return rows;
-    return rows.slice().sort((a, b) => {
-      let va = a[sort.col], vb = b[sort.col];
-      if (typeof va === 'string') {
-        return sort.asc ? va.localeCompare(vb) : vb.localeCompare(va);
-      }
-      if (va === null || va === undefined || isNaN(va)) va = -Infinity;
-      if (vb === null || vb === undefined || isNaN(vb)) vb = -Infinity;
-      return sort.asc ? va - vb : vb - va;
-    });
-  }
-
-  function applySortIndicators(tableId, sort) {
-    document.querySelectorAll('#' + tableId + ' thead th').forEach(th => {
-      th.classList.remove('sort-asc', 'sort-desc');
-      if (th.dataset.col === sort.col) th.classList.add(sort.asc ? 'sort-asc' : 'sort-desc');
-    });
-  }
-
-  function renderUtTypeTable() {
-    const rows = sortRows(utData.types, utTypeSort);
-    const body = document.getElementById('utTypeBody');
-    body.innerHTML = rows.map(r => {
-      const pctCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
-      const valCls = r.diffVal >= 0 ? 'pos' : 'neg';
-      return \`<tr>
-        <td style="text-align:left;padding-left:14px;font-weight:600;color:#1B5E20;">\${r.type}</td>
-        <td>\${fmtNum(r.amount)}</td>
-        <td>\${fmtNum(r.amountYA)}</td>
-        <td class="\${pctCls}">\${fmtPct(r.diffPct)}</td>
-        <td class="\${valCls}">\${fmtNum(r.diffVal)}</td>
-      </tr>\`;
-    }).join('');
-    const t = utData.total || {};
-    const pctCls = t.diffPct >= 0 ? 'pos' : 'neg';
-    const valCls = t.diffVal >= 0 ? 'pos' : 'neg';
-    document.getElementById('utTypeFoot').innerHTML = \`<tr style="background:#FAF8F0;font-weight:700;">
-      <td style="text-align:left;padding-left:14px;color:#1B5E20;">TOTAL</td>
-      <td>\${fmtNum(t.amount)}</td>
-      <td>\${fmtNum(t.amountYA)}</td>
-      <td class="\${pctCls}">\${fmtPct(t.diffPct)}</td>
-      <td class="\${valCls}">\${fmtNum(t.diffVal)}</td>
-    </tr>\`;
-    applySortIndicators('utTypeTable', utTypeSort);
-  }
-
-  function renderUtStoreTable() {
-    const rows = sortRows(utData.stores, utStoreSort);
-    const body = document.getElementById('utStoreBody');
-    body.innerHTML = rows.map(r => {
-      const pctCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
-      const valCls = r.diffVal >= 0 ? 'pos' : 'neg';
-      return \`<tr>
-        <td style="text-align:left;padding-left:14px;">\${r.storeId}</td>
-        <td style="text-align:left;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
-        <td style="text-align:left;">\${r.area}</td>
-        <td>\${fmtNum(r.amount)}</td>
-        <td>\${fmtNum(r.amountYA)}</td>
-        <td class="\${pctCls}">\${fmtPct(r.diffPct)}</td>
-        <td class="\${valCls}">\${fmtNum(r.diffVal)}</td>
-      </tr>\`;
-    }).join('');
-    applySortIndicators('utStoreTable', utStoreSort);
-  }
-
-  function renderUtChart() {
-    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
-      Chart.register(window.ChartDataLabels);
-      Chart._datalabelsRegistered = true;
-    }
-    const sorted = utData.types.slice()
-      .filter(t => t.diffPct !== null && isFinite(t.diffPct))
-      .sort((a, b) => b.diffPct - a.diffPct);
-    if (utChart) { utChart.destroy(); utChart = null; }
-    const G = '#1B5E20', GL = '#66BB6A', R = '#C62828';
-    utChart = new Chart(document.getElementById('utChartType'), {
-      type: 'bar',
-      data: {
-        labels: sorted.map(t => t.type),
-        datasets: [{
-          label: 'Growth %',
-          data: sorted.map(t => t.diffPct),
-          backgroundColor: sorted.map(t => t.diffPct >= 0 ? GL : R),
-          borderColor:     sorted.map(t => t.diffPct >= 0 ? G  : R),
-          borderWidth: 1.5
-        }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
-        plugins: {
-          legend: { display: false },
-          datalabels: {
-            anchor: 'end', align: 'end', offset: 4,
-            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? G : R,
-            font: { size: 10, weight: 700 },
-            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
-          }
-        },
-        scales: {
-          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
-          y: { ticks: { color: '#333', font: { size: 10, weight: 500 }, autoSkip: false }, grid: { display: false } }
-        }
-      }
-    });
-  }
-
-  // Sortable header click handlers
-  document.addEventListener('click', (e) => {
-    const th = e.target.closest('th.sortable');
-    if (!th) return;
-    const table = th.closest('table');
-    if (!table) return;
-    const col = th.dataset.col;
-    if (!col) return;
-    if (table.id === 'utTypeTable') {
-      if (utTypeSort.col === col) utTypeSort.asc = !utTypeSort.asc;
-      else { utTypeSort = { col, asc: false }; }
-      renderUtTypeTable();
-    } else if (table.id === 'utStoreTable') {
-      if (utStoreSort.col === col) utStoreSort.asc = !utStoreSort.asc;
-      else { utStoreSort = { col, asc: false }; }
-      renderUtStoreTable();
-    }
-  });
-
-  // ============ FINANCIAL PERFORMANCE TAB ============
-  let finData = { stores: [], total: null };
-  let finCharts = {};
-  let finPlSort   = { col: 'rank',        asc: true };
-  let finProdSort = { col: 'salesPerSqm', asc: false };
-
-  document.getElementById('finTypeFilter').addEventListener('change', loadFinancial);
-  document.getElementById('finAreaFilter').addEventListener('change', loadFinancial);
-  let finAreasPopulated = false;
-
-  function populateFinAreas(areas) {
-    if (finAreasPopulated) return;
-    const sel = document.getElementById('finAreaFilter');
-    const current = sel.value;
-    areas.forEach(a => sel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
-    if (current) sel.value = current;
-    finAreasPopulated = true;
-  }
-
-  async function loadFinancial() {
-    const btn = document.getElementById('finRefreshBtn');
-    const status = document.getElementById('finStatusBar');
-    btn.classList.add('loading'); btn.textContent = '⏳ Loading...';
-    status.className = 'status-bar loading';
-    status.innerHTML = '<span class="spinner"></span> Loading financial data...';
-    try {
-      const type = document.getElementById('finTypeFilter').value;
-      const area = document.getElementById('finAreaFilter').value;
-      const params = new URLSearchParams();
-      params.set('type', type);
-      if (area) params.set('area', area);
-      const res = await fetch('/api/financial?' + params.toString());
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'Unknown error');
-      finData = data;
-      populateFinAreas(data.availableAreas || []);
-      renderFinKpis();
-      renderFinPlTable();
-      renderFinProdTable();
-      renderFinCharts();
-      status.className = 'status-bar';
-      const typeTxt = type === 'all' ? 'All Stores' : (type === 'full' ? 'Full Stores' : 'Minimarts');
-      const tag = (area ? area + ' · ' : '') + typeTxt;
-      status.innerHTML = \`✅ \${tag} · \${data.stores.length} stores · YTD 2026 vs YTD 2025\`;
-      document.getElementById('finPlTag').textContent = tag;
-    } catch (err) {
-      status.className = 'status-bar error';
-      status.innerHTML = '❌ Error: ' + err.message;
-    } finally {
-      btn.classList.remove('loading');
-      btn.textContent = '↻ Refresh';
-    }
-  }
-
-  function finFmtMoney(v) {
-    if (v === null || v === undefined || !isFinite(v)) return '-';
-    const abs = Math.abs(v);
-    if (abs >= 1e9)  return '₱' + (v/1e9).toFixed(2) + 'B';
-    if (abs >= 1e6)  return '₱' + (v/1e6).toFixed(1) + 'M';
-    if (abs >= 1e3)  return '₱' + (v/1e3).toFixed(0) + 'K';
-    return '₱' + Math.round(v).toLocaleString('en-US');
-  }
-  function finFmtNum(v, dec) {
-    if (v === null || v === undefined || !isFinite(v)) return '-';
-    return v.toLocaleString('en-US', { minimumFractionDigits: dec||0, maximumFractionDigits: dec||0 });
-  }
-  function finFmtPct(v, signed) {
-    if (v === null || v === undefined || !isFinite(v)) return '-';
-    const sign = signed && v >= 0 ? '+' : '';
-    return sign + v.toFixed(2) + '%';
-  }
-  function finPctClass(v) {
-    if (v === null || v === undefined || isNaN(v)) return '';
-    return v >= 0 ? 'pos' : 'neg';
-  }
-
-  function finRenderKpi(id, label, value, subtext, deltaPct) {
-    const card = document.getElementById(id);
-    const badge = deltaPct === null || deltaPct === undefined || !isFinite(deltaPct)
-      ? ''
-      : \` <span class="kpi-pct-badge \${finPctClass(deltaPct)}">\${finFmtPct(deltaPct, true)}</span>\`;
-    card.innerHTML = \`
-      <div class="kpi-label">\${label}</div>
-      <div class="kpi-value">\${value}\${badge}</div>
-      <div class="kpi-sub">\${subtext || ''}</div>\`;
-  }
-
-  function finAggregate(stores) {
-    const sum = (k) => stores.reduce((s, r) => s + (r[k] || 0), 0);
-    const totalSales = sum('posSales');
-    const wPct = (k) => totalSales !== 0 ? (sum(k) / totalSales) * 100 : 0;
-    return {
-      posSales: sum('posSales'), posSalesYA: sum('posSalesYA'),
-      frontMargin: sum('frontMargin'), frontMarginYA: sum('frontMarginYA'),
-      backMargin:  sum('backMargin'),  backMarginYA:  sum('backMarginYA'),
-      opex:     sum('opex'),     opexYA:     sum('opexYA'),
-      opIncome: sum('opIncome'), opIncomeYA: sum('opIncomeYA'),
-      rentIncome: sum('rentIncome'), rentIncomeYA: sum('rentIncomeYA'),
-      niat:   sum('niat'),   niatYA:   sum('niatYA'),
-      ebitda: sum('ebitda'), ebitdaYA: sum('ebitdaYA'),
-      sellingArea: sum('sellingArea'),
-      hcTotal: sum('hcTotal'), hcTotalYA: sum('hcTotalYA'),
-      _frontPct: wPct('frontMargin'), _backPct: wPct('backMargin'),
-      _opexPct: wPct('opex'), _opIncPct: wPct('opIncome'),
-      _niatPct: wPct('niat'), _ebitdaPct: wPct('ebitda')
-    };
-  }
-  function finPctDelta(cur, ya) {
-    return ya !== 0 ? ((cur - ya) / Math.abs(ya)) * 100 : null;
-  }
-
-  function renderFinKpis() {
-    const a = finAggregate(finData.stores);
-    finRenderKpi('finKpiSales', 'POS Sales (YTD)', finFmtMoney(a.posSales),
-      'vs YA: ' + finFmtMoney(a.posSalesYA), finPctDelta(a.posSales, a.posSalesYA));
-    finRenderKpi('finKpiFrontMargin', 'Front Margin', finFmtMoney(a.frontMargin),
-      a._frontPct.toFixed(2) + '% of sales', finPctDelta(a.frontMargin, a.frontMarginYA));
-    finRenderKpi('finKpiBackMargin', 'Back Margin', finFmtMoney(a.backMargin),
-      a._backPct.toFixed(2) + '% of sales', finPctDelta(a.backMargin, a.backMarginYA));
-    // OPEX growth above sales growth is bad - badge color follows the inverted sign
-    const opexDelta = finPctDelta(a.opex, a.opexYA);
-    finRenderKpi('finKpiOpex', 'Store OPEX', finFmtMoney(a.opex),
-      a._opexPct.toFixed(2) + '% of sales', opexDelta === null ? null : -opexDelta);
-    finRenderKpi('finKpiOpIncome', 'Operating Income', finFmtMoney(a.opIncome),
-      a._opIncPct.toFixed(2) + '% of sales', finPctDelta(a.opIncome, a.opIncomeYA));
-    finRenderKpi('finKpiNiat', 'NIAT', finFmtMoney(a.niat),
-      a._niatPct.toFixed(2) + '% of sales', finPctDelta(a.niat, a.niatYA));
-    finRenderKpi('finKpiEbitda', 'EBITDA', finFmtMoney(a.ebitda),
-      a._ebitdaPct.toFixed(2) + '% of sales', finPctDelta(a.ebitda, a.ebitdaYA));
-    const overallSqm = a.sellingArea !== 0 ? (a.posSales / a.sellingArea / 6) : 0;
-    finRenderKpi('finKpiSalesPerSqm', 'Avg Sales / SQM (mo.)', finFmtMoney(overallSqm),
-      'Total selling area: ' + finFmtNum(a.sellingArea, 0) + ' sqm', null);
-  }
-
-  function finSortRows(rows, sort) {
-    return rows.slice().sort((a, b) => {
-      let va = a[sort.col], vb = b[sort.col];
-      if (typeof va === 'string') return sort.asc ? va.localeCompare(vb) : vb.localeCompare(va);
-      if (va === null || va === undefined || isNaN(va)) va = -Infinity;
-      if (vb === null || vb === undefined || isNaN(vb)) vb = -Infinity;
-      return sort.asc ? va - vb : vb - va;
-    });
-  }
-  function finApplySortIndicators(tableId, sort) {
-    document.querySelectorAll('#' + tableId + ' thead th').forEach(th => {
-      th.classList.remove('sort-asc', 'sort-desc');
-      if (th.dataset.col === sort.col) th.classList.add(sort.asc ? 'sort-asc' : 'sort-desc');
-    });
-  }
-
-  function renderFinPlTable() {
-    const rows = finSortRows(finData.stores, finPlSort);
-    const body = document.getElementById('finPlBody');
-    body.innerHTML = rows.map(r => \`<tr>
-      <td style="text-align:center;padding-left:14px;">\${r.rank || ''}</td>
-      <td style="text-align:left;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
-      <td style="text-align:left;">\${r.area || ''}</td>
-      <td>\${finFmtMoney(r.posSales)}</td>
-      <td>\${finFmtMoney(r.posSalesYA)}</td>
-      <td class="\${finPctClass(r.posSalesPct)}">\${finFmtPct(r.posSalesPct, true)}</td>
-      <td>\${finFmtPct(r.frontMarginPct)}</td>
-      <td>\${finFmtPct(r.backMarginPct)}</td>
-      <td>\${finFmtPct(r.opexPct)}</td>
-      <td>\${finFmtMoney(r.opIncome)}</td>
-      <td class="\${finPctClass(r.opIncomePct)}">\${finFmtPct(r.opIncomePct)}</td>
-      <td>\${finFmtMoney(r.niat)}</td>
-      <td class="\${finPctClass(r.niatPct)}">\${finFmtPct(r.niatPct)}</td>
-      <td>\${finFmtMoney(r.ebitda)}</td>
-      <td class="\${finPctClass(r.ebitdaPct)}">\${finFmtPct(r.ebitdaPct)}</td>
-    </tr>\`).join('');
-
-    const agg = finAggregate(finData.stores);
-    const salesGrowth = finPctDelta(agg.posSales, agg.posSalesYA);
-    document.getElementById('finPlFoot').innerHTML = \`<tr style="background:#FAF8F0;font-weight:700;">
-      <td></td>
-      <td style="text-align:left;color:#1B5E20;">SUBTOTAL (\${finData.stores.length})</td>
-      <td></td>
-      <td>\${finFmtMoney(agg.posSales)}</td>
-      <td>\${finFmtMoney(agg.posSalesYA)}</td>
-      <td class="\${finPctClass(salesGrowth)}">\${finFmtPct(salesGrowth, true)}</td>
-      <td>\${finFmtPct(agg._frontPct)}</td>
-      <td>\${finFmtPct(agg._backPct)}</td>
-      <td>\${finFmtPct(agg._opexPct)}</td>
-      <td>\${finFmtMoney(agg.opIncome)}</td>
-      <td>\${finFmtPct(agg._opIncPct)}</td>
-      <td>\${finFmtMoney(agg.niat)}</td>
-      <td>\${finFmtPct(agg._niatPct)}</td>
-      <td>\${finFmtMoney(agg.ebitda)}</td>
-      <td>\${finFmtPct(agg._ebitdaPct)}</td>
-    </tr>\`;
-    finApplySortIndicators('finPlTable', finPlSort);
-  }
-
-  function renderFinProdTable() {
-    const enriched = finData.stores.map(s => {
-      s.sqmGrowth = s.salesPerSqmYA !== 0 ? ((s.salesPerSqm - s.salesPerSqmYA) / Math.abs(s.salesPerSqmYA)) * 100 : null;
-      s.revPerHcGrowth = s.revPerHcTotalYA !== 0 ? ((s.revPerHcTotal - s.revPerHcTotalYA) / Math.abs(s.revPerHcTotalYA)) * 100 : null;
-      return s;
-    });
-    const rows = finSortRows(enriched, finProdSort);
-    document.getElementById('finProdBody').innerHTML = rows.map(r => \`<tr>
-      <td style="text-align:left;padding-left:14px;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
-      <td style="text-align:left;">\${r.area || ''}</td>
-      <td>\${finFmtNum(r.sellingArea, 0)}</td>
-      <td>\${finFmtMoney(r.salesPerSqm)}</td>
-      <td>\${finFmtMoney(r.salesPerSqmYA)}</td>
-      <td class="\${finPctClass(r.sqmGrowth)}">\${finFmtPct(r.sqmGrowth, true)}</td>
-      <td>\${finFmtNum(r.hcTotal, 0)}</td>
-      <td>\${finFmtNum(r.hcTotalYA, 0)}</td>
-      <td>\${finFmtMoney(r.revPerHcTotal)}</td>
-      <td>\${finFmtMoney(r.revPerHcTotalYA)}</td>
-      <td class="\${finPctClass(r.revPerHcGrowth)}">\${finFmtPct(r.revPerHcGrowth, true)}</td>
-    </tr>\`).join('');
-    finApplySortIndicators('finProdTable', finProdSort);
-  }
-
-  function renderFinCharts() {
-    if (window.ChartDataLabels && !Chart._datalabelsRegistered) {
-      Chart.register(window.ChartDataLabels);
-      Chart._datalabelsRegistered = true;
-    }
-    Object.values(finCharts).forEach(c => { if (c) c.destroy(); });
-    finCharts = {};
-
-    const GREEN = '#1B5E20', GL = '#66BB6A', YELLOW = '#FFC107', RED = '#C62828',
-          BLUE = '#1976D2', AMBER = '#F57C00';
-    const compactMoney = v => {
-      const abs = Math.abs(v);
-      if (abs >= 1e9) return '₱' + (v/1e9).toFixed(1) + 'B';
-      if (abs >= 1e6) return '₱' + (v/1e6).toFixed(0) + 'M';
-      if (abs >= 1e3) return '₱' + (v/1e3).toFixed(0) + 'K';
-      return '₱' + Math.round(v);
-    };
-
-    const a = finAggregate(finData.stores);
-
-    // Dynamic height for per-store horizontal charts
-    const tallH = Math.max(360, finData.stores.length * 22 + 60);
-    ['finChartSalesGrowth','finChartNiat','finChartEbitda','finChartSqm'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el && el.parentElement) el.parentElement.style.height = tallH + 'px';
-    });
-
-    // 1) P&L Waterfall (vertical bars)
-    finCharts.waterfall = new Chart(document.getElementById('finChartWaterfall'), {
-      type: 'bar',
-      data: {
-        labels: ['POS Sales','Front Margin','Back Margin','OPEX','Op. Income','Rent Inc.','NIAT','EBITDA'],
-        datasets: [{
-          data: [a.posSales, a.frontMargin, a.backMargin, -a.opex, a.opIncome, a.rentIncome, a.niat, a.ebitda],
-          backgroundColor: [GREEN, GL, GL, RED, BLUE, AMBER, GREEN, GREEN],
-          borderWidth: 0
-        }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: {
-          legend: { display: false },
-          datalabels: {
-            anchor: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? 'end' : 'start',
-            align:  ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? 'end' : 'start',
-            color: '#333', font: { size: 10, weight: 700 },
-            formatter: v => compactMoney(v)
-          },
-          tooltip: { callbacks: { label: ctx => compactMoney(ctx.raw) } }
-        },
-        scales: {
-          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { display: false } },
-          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactMoney(v) }, grid: { color: '#eee' } }
-        }
-      }
-    });
-
-    // 2) Margin Structure - stacked horizontal showing how each ₱1 of sales is split
-    const cogsPct = Math.max(0, 100 - a._frontPct);
-    finCharts.marginStruct = new Chart(document.getElementById('finChartMarginStruct'), {
-      type: 'bar',
-      data: {
-        labels: ['% of Sales'],
-        datasets: [
-          { label: 'COGS', data: [cogsPct], backgroundColor: '#9E9E9E' },
-          { label: 'Front Margin', data: [a._frontPct], backgroundColor: GL },
-          { label: 'Back Margin', data: [a._backPct], backgroundColor: '#43A047' },
-          { label: 'OPEX', data: [a._opexPct], backgroundColor: RED },
-          { label: 'NIAT', data: [a._niatPct], backgroundColor: BLUE }
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
-        plugins: {
-          legend: { position: 'bottom', labels: { font: { size: 10 }, boxWidth: 12 } },
-          datalabels: {
-            color: 'white', font: { size: 10, weight: 700 },
-            formatter: v => v < 3 ? '' : v.toFixed(1) + '%'
-          }
-        },
-        scales: {
-          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
-          y: { ticks: { display: false }, grid: { display: false } }
-        }
-      }
-    });
-
-    function makeHorizontalPctChart(canvasId, dataArr, colorPos, colorNeg) {
-      return new Chart(document.getElementById(canvasId), {
-        type: 'bar',
-        data: {
-          labels: dataArr.map(d => d.label),
-          datasets: [{
-            data: dataArr.map(d => d.value),
-            backgroundColor: dataArr.map(d => d.value >= 0 ? colorPos : colorNeg),
-            borderWidth: 0
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, indexAxis: 'y',
-          plugins: {
-            legend: { display: false },
-            datalabels: {
-              anchor: 'end', align: 'end', offset: 4,
-              color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? colorPos : colorNeg,
-              font: { size: 10, weight: 700 },
-              formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
-            }
-          },
-          scales: {
-            x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
-            y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
-          }
-        }
-      });
-    }
-
-    // 3) Sales Growth %
-    const sortedSales = finData.stores.slice().sort((a,b) => b.posSalesPct - a.posSalesPct);
-    finCharts.salesGrowth = makeHorizontalPctChart('finChartSalesGrowth',
-      sortedSales.map(s => ({ label: s.storeName, value: s.posSalesPct })), GREEN, RED);
-
-    // 4) NIAT %
-    const sortedNiat = finData.stores.slice().sort((a,b) => b.niatPct - a.niatPct);
-    finCharts.niat = makeHorizontalPctChart('finChartNiat',
-      sortedNiat.map(s => ({ label: s.storeName, value: s.niatPct })), BLUE, RED);
-
-    // 5) EBITDA %
-    const sortedEbitda = finData.stores.slice().sort((a,b) => b.ebitdaPct - a.ebitdaPct);
-    finCharts.ebitda = makeHorizontalPctChart('finChartEbitda',
-      sortedEbitda.map(s => ({ label: s.storeName, value: s.ebitdaPct })), GREEN, RED);
-
-    // 6) Sales/SQM Current vs YA (grouped horizontal)
-    const sortedSqm = finData.stores.slice().sort((a,b) => b.salesPerSqm - a.salesPerSqm);
-    finCharts.sqm = new Chart(document.getElementById('finChartSqm'), {
-      type: 'bar',
-      data: {
-        labels: sortedSqm.map(s => s.storeName),
-        datasets: [
-          { label: 'Current',  data: sortedSqm.map(s => s.salesPerSqm),   backgroundColor: GREEN },
-          { label: 'Year Ago', data: sortedSqm.map(s => s.salesPerSqmYA), backgroundColor: YELLOW }
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
-        plugins: {
-          legend: { position: 'bottom', labels: { font: { size: 10 }, boxWidth: 12 } },
-          datalabels: { display: false }
-        },
-        scales: {
-          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => compactMoney(v) }, grid: { color: '#eee' } },
-          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
-        }
-      }
-    });
-  }
-
-  // Sortable headers for financial tables
-  document.addEventListener('click', (e) => {
-    const th = e.target.closest('th.sortable');
-    if (!th) return;
-    const table = th.closest('table');
-    if (!table) return;
-    const col = th.dataset.col;
-    if (!col) return;
-    if (table.id === 'finPlTable') {
-      if (finPlSort.col === col) finPlSort.asc = !finPlSort.asc;
-      else { finPlSort = { col, asc: (col === 'rank' || col === 'storeName') }; }
-      renderFinPlTable();
-    } else if (table.id === 'finProdTable') {
-      if (finProdSort.col === col) finProdSort.asc = !finProdSort.asc;
-      else { finProdSort = { col, asc: col === 'storeName' }; }
-      renderFinProdTable();
-    }
-  });
-
 </script>
 </body>
 </html>`;
