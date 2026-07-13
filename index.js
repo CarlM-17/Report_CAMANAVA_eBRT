@@ -1799,6 +1799,14 @@ const html = `<!DOCTYPE html>
     box-shadow: inset 3px 0 0 #FFC107;
   }
   #csCategoryTable tbody tr.dimmed td { opacity: 0.45; }
+  #csDetailTable tbody tr { cursor: pointer; }
+  #csDetailTable tbody tr.drilled td {
+    background: #FFF9C4 !important;
+    box-shadow: inset 3px 0 0 #FFC107;
+  }
+  #csDetailTable tbody tr.dimmed td { opacity: 0.45; }
+  .variance-filters { margin-left: 8px; }
+  .drill-active + .variance-filters { margin-left: 8px; }
   .drill-tag {
     display: inline-block; padding: 2px 8px; border-radius: 10px;
     background: #FFC107; color: #1a2e1f; font-size: 9.5px; font-weight: 800;
@@ -2208,6 +2216,11 @@ const html = `<!DOCTYPE html>
     <div class="table-title-bar">
       Sub-Department Detail
       <span class="table-meta">Top 100 by Sales</span>
+      <span class="drill-hint" id="csSubDrillHint">Click a row to drill through</span>
+      <span class="drill-active" id="csSubDrillActive" style="display:none;">
+        <span id="csSubDrillLabel"></span>
+        <button onclick="csClearSubDrill()">✕ Clear</button>
+      </span>
       <span class="variance-filters">
         <button data-var="all" class="active" onclick="csSetVariance('all')">All</button>
         <button data-var="positive" onclick="csSetVariance('positive')">↑ Positive</button>
@@ -3524,6 +3537,7 @@ const html = `<!DOCTYPE html>
   let csCurrentData = null;
   let csVarianceFilter = 'all';
   let csDrillCategory = null;   // drill-through: category selected from summary table
+  let csDrillSubDept  = null;   // drill-through: sub-department selected from detail table
   let csSubDeptsByCategory = null;   // { catName: [subDepts...] }
   let csAllSubDepts = null;          // full list (when no category bd filter)
   let csSorts = {
@@ -3759,7 +3773,10 @@ const html = `<!DOCTYPE html>
     document.getElementById('csDetailBody').innerHTML = rows.map(r => {
       const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
       const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
-      return \`<tr>
+      const drillCls = csDrillSubDept
+        ? (r.subDept === csDrillSubDept ? 'drilled' : 'dimmed')
+        : '';
+      return \`<tr class="\${drillCls}" data-subdept="\${r.subDept}">
         <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.category)}">\${r.category}</span></td>
         <td class="text-col">\${r.subDept}</td>
         <td>\${csFmt(r.sales)}</td>
@@ -3813,8 +3830,9 @@ const html = `<!DOCTYPE html>
     }).join('');
   }
 
-  // ----- Drill-through from Category Summary -----
+  // ----- Drill-through (Category Summary + Sub-Department Detail) -----
   function csUpdateDrillBanner() {
+    // Category drill banner
     const hint   = document.getElementById('csDrillHint');
     const active = document.getElementById('csDrillActive');
     const label  = document.getElementById('csDrillLabel');
@@ -3826,17 +3844,41 @@ const html = `<!DOCTYPE html>
       hint.style.display = 'block';
       active.style.display = 'none';
     }
-    // Tag the downstream table titles
+
+    // Sub-department drill banner
+    const sHint   = document.getElementById('csSubDrillHint');
+    const sActive = document.getElementById('csSubDrillActive');
+    const sLabel  = document.getElementById('csSubDrillLabel');
+    if (csDrillSubDept) {
+      sHint.style.display = 'none';
+      sActive.style.display = 'flex';
+      sLabel.textContent = 'Drilled into: ' + csDrillSubDept;
+    } else {
+      sHint.style.display = 'block';
+      sActive.style.display = 'none';
+    }
+
+    // Tag the downstream table titles with the active drill scope
     document.querySelectorAll('.drill-tag').forEach(el => el.remove());
-    if (csDrillCategory) {
-      ['csDetailTable','csAreaTable','csStoreTable'].forEach(tid => {
-        const card = document.getElementById(tid).closest('.table-card');
+    const scopeParts = [csDrillCategory, csDrillSubDept].filter(Boolean);
+    if (scopeParts.length) {
+      // Detail table only shows the category tag (its own subdept drill is shown in its banner)
+      const targets = [
+        { id: 'csDetailTable', text: csDrillCategory },
+        { id: 'csAreaTable',   text: scopeParts.join(' › ') },
+        { id: 'csStoreTable',  text: scopeParts.join(' › ') }
+      ];
+      targets.forEach(t => {
+        if (!t.text) return;
+        const table = document.getElementById(t.id);
+        const card = table && table.closest('.table-card');
         const bar = card && card.querySelector('.table-title-bar');
-        if (bar && !bar.querySelector('.drill-tag')) {
+        if (bar) {
           const tag = document.createElement('span');
           tag.className = 'drill-tag';
-          tag.textContent = csDrillCategory;
-          bar.insertBefore(tag, bar.querySelector('.variance-filters') || null);
+          tag.textContent = t.text;
+          const anchor = bar.querySelector('.drill-hint') || bar.querySelector('.variance-filters');
+          bar.insertBefore(tag, anchor || null);
         }
       });
     }
@@ -3844,6 +3886,10 @@ const html = `<!DOCTYPE html>
 
   function csSetDrill(category) {
     csDrillCategory = (csDrillCategory === category) ? null : category;
+    // Changing category invalidates any sub-dept drill
+    csDrillSubDept = null;
+    const bds = document.getElementById('csBdSubDept');
+    if (bds) bds.value = '';
     // Sync the Area & Store breakdown Category dropdown so backend filters those tables
     const bdc = document.getElementById('csBdCategory');
     if (bdc) {
@@ -3856,19 +3902,42 @@ const html = `<!DOCTYPE html>
 
   function csClearDrill() {
     csDrillCategory = null;
+    csDrillSubDept = null;
     const bdc = document.getElementById('csBdCategory');
-    if (bdc) { bdc.value = ''; csRebuildSubDeptDropdown(); }
+    const bds = document.getElementById('csBdSubDept');
+    if (bdc) bdc.value = '';
+    if (bds) bds.value = '';
+    if (bdc) csRebuildSubDeptDropdown();
     csUpdateDrillBanner();
     loadCategorySales();
   }
   window.csClearDrill = csClearDrill;
 
-  // Row click -> drill
+  function csSetSubDrill(subDept) {
+    csDrillSubDept = (csDrillSubDept === subDept) ? null : subDept;
+    // Sync the Area & Store breakdown Sub-Dept dropdown so backend filters those tables
+    const bds = document.getElementById('csBdSubDept');
+    if (bds) bds.value = csDrillSubDept || '';
+    csUpdateDrillBanner();
+    loadCategorySales();
+  }
+
+  function csClearSubDrill() {
+    csDrillSubDept = null;
+    const bds = document.getElementById('csBdSubDept');
+    if (bds) bds.value = '';
+    csUpdateDrillBanner();
+    loadCategorySales();
+  }
+  window.csClearSubDrill = csClearSubDrill;
+
+  // Row click -> drill (category summary + sub-department detail)
   document.addEventListener('click', (e) => {
-    const tr = e.target.closest('#csCategoryTable tbody tr');
-    if (!tr || !csCurrentData) return;
-    const cat = tr.dataset.category;
-    if (cat) csSetDrill(cat);
+    if (!csCurrentData) return;
+    const catRow = e.target.closest('#csCategoryTable tbody tr');
+    if (catRow && catRow.dataset.category) { csSetDrill(catRow.dataset.category); return; }
+    const subRow = e.target.closest('#csDetailTable tbody tr');
+    if (subRow && subRow.dataset.subdept) { csSetSubDrill(subRow.dataset.subdept); return; }
   });
 
   // Sort click handler for all category sales tables
