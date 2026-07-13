@@ -2328,6 +2328,11 @@ const html = `<!DOCTYPE html>
   .cs-table tbody tr:hover td { background: #FFF8E1; }
   .cs-table tbody tr:nth-child(even) td { background: #fafbf9; }
   .cs-table tbody tr:nth-child(even):hover td { background: #FFF8E1; }
+  .cs-table tbody tr.cs-drillable { cursor: pointer; }
+  .cs-table tbody tr.cs-drill-active td { background: #E8F5E9 !important; border-left: 3px solid #2E7D32; }
+  .cs-drill-badge { display: inline-flex; align-items: center; gap: 4px; background: #E8F5E9; color: #1B5E20; font-size: 10.5px; font-weight: 700; padding: 3px 10px; border-radius: 12px; margin-left: 8px; cursor: pointer; border: 1px solid #A5D6A7; transition: all 0.15s; }
+  .cs-drill-badge:hover { background: #C8E6C9; border-color: #66BB6A; }
+  .cs-drill-badge .cs-drill-x { font-size: 13px; font-weight: 800; line-height: 1; }
   .cs-table tfoot td {
     padding: 9px 10px; font-weight: 800;
     background: linear-gradient(90deg, #FFF8E1 0%, #FFF9C4 100%);
@@ -4443,6 +4448,8 @@ const html = `<!DOCTYPE html>
   let csVarianceFilter = 'all';
   let csSubDeptsByCategory = null;   // { catName: [subDepts...] }
   let csAllSubDepts = null;          // full list (when no category bd filter)
+  let csDrillCategory = null;
+  let csDrillSubDept  = null;
   let csSorts = {
     cat:    { col: 'sales', asc: false },
     detail: { col: 'sales', asc: false },
@@ -4519,10 +4526,18 @@ const html = `<!DOCTYPE html>
       areaSel.addEventListener('change', loadCategorySales);
       storeSel.addEventListener('change', loadCategorySales);
       document.getElementById('csBdCategory').addEventListener('change', () => {
+        csDrillCategory = document.getElementById('csBdCategory').value || null;
+        csDrillSubDept = null;
         csRebuildSubDeptDropdown();
+        renderCsCategoryTable();
+        renderCsDetailTable();
         loadCategorySales();
       });
-      document.getElementById('csBdSubDept').addEventListener('change', loadCategorySales);
+      document.getElementById('csBdSubDept').addEventListener('change', () => {
+        csDrillSubDept = document.getElementById('csBdSubDept').value || null;
+        renderCsDetailTable();
+        loadCategorySales();
+      });
       document.getElementById('csBdSubDeptSearch').addEventListener('input', csRebuildSubDeptDropdown);
       csFiltersLoaded = true;
     } catch (e) { console.error('cs filter load failed', e); }
@@ -4636,7 +4651,8 @@ const html = `<!DOCTYPE html>
     document.getElementById('csCategoryBody').innerHTML = rows.map(r => {
       const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
       const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
-      return \`<tr>
+      const activeCls = csDrillCategory === r.name ? ' cs-drill-active' : '';
+      return \`<tr class="cs-drillable\${activeCls}" data-drill-cat="\${r.name}">
         <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.name)}">\${r.name}</span></td>
         <td>\${csFmt(r.sales)}</td>
         <td>\${csFmt(r.salesLY)}</td>
@@ -4657,12 +4673,15 @@ const html = `<!DOCTYPE html>
       <td class="\${totDiffAmtCls}">\${csFmtSigned(t.diffAmount)}</td>
       <td>100.00%</td>
     </tr>\`;
-    document.getElementById('csCategoryMeta').textContent = t.categoryCount + ' categories';
+    const metaEl = document.getElementById('csCategoryMeta');
+    metaEl.innerHTML = t.categoryCount + ' categories' +
+      (csDrillCategory ? \` <span class="cs-drill-badge" onclick="csClearDrill('cat')">Filtering: \${csDrillCategory} <span class="cs-drill-x">×</span></span>\` : '');
   }
 
   function renderCsDetailTable() {
     if (!csCurrentData) return;
     let rows = csCurrentData.subDeptDetail.slice();
+    if (csDrillCategory) rows = rows.filter(r => r.category === csDrillCategory);
     if (csVarianceFilter === 'positive') rows = rows.filter(r => r.diffAmount > 0);
     else if (csVarianceFilter === 'negative') rows = rows.filter(r => r.diffAmount < 0);
     rows = csSort(rows, csSorts.detail.col, csSorts.detail.asc);
@@ -4670,7 +4689,8 @@ const html = `<!DOCTYPE html>
     document.getElementById('csDetailBody').innerHTML = rows.map(r => {
       const diffCls = r.diffPct === null ? '' : (r.diffPct >= 0 ? 'pos' : 'neg');
       const diffAmtCls = r.diffAmount >= 0 ? 'pos' : 'neg';
-      return \`<tr>
+      const activeCls = csDrillSubDept === r.subDept ? ' cs-drill-active' : '';
+      return \`<tr class="cs-drillable\${activeCls}" data-drill-subdept="\${r.subDept}" data-drill-cat="\${r.category}">
         <td class="text-col"><span class="cat-badge" style="background:\${csCatColor(r.category)}">\${r.category}</span></td>
         <td class="text-col">\${r.subDept}</td>
         <td>\${csFmt(r.sales)}</td>
@@ -4679,6 +4699,10 @@ const html = `<!DOCTYPE html>
         <td class="\${diffAmtCls}">\${csFmtSigned(r.diffAmount)}</td>
       </tr>\`;
     }).join('');
+    const detailTitle = document.querySelector('#csDetailTable').closest('.table-card').querySelector('.table-title-bar .table-meta');
+    const drillInfo = csDrillCategory ? ' · Filtered by ' + csDrillCategory : '';
+    const subDrillInfo = csDrillSubDept ? \` <span class="cs-drill-badge" onclick="csClearDrill('subdept')">Filtering: \${csDrillSubDept} <span class="cs-drill-x">×</span></span>\` : '';
+    detailTitle.innerHTML = 'Top 100 by Sales' + drillInfo + subDrillInfo;
   }
   function csSetVariance(v) {
     csVarianceFilter = v;
@@ -4703,6 +4727,9 @@ const html = `<!DOCTYPE html>
         <td class="\${diffAmtCls}">\${csFmtSigned(r.diffAmount)}</td>
       </tr>\`;
     }).join('');
+    const titleBar = document.querySelector('#csAreaTable').closest('.table-card').querySelector('.table-title-bar');
+    const drillLabel = csDrillSubDept || csDrillCategory || null;
+    titleBar.innerHTML = 'Sales by Area' + (drillLabel ? \` <span class="cs-drill-badge" onclick="csClearDrill('all')">Filtered: \${drillLabel} <span class="cs-drill-x">×</span></span>\` : '');
   }
 
   function renderCsStoreTable() {
@@ -4722,10 +4749,60 @@ const html = `<!DOCTYPE html>
         <td class="\${diffAmtCls}">\${csFmtSigned(r.diffAmount)}</td>
       </tr>\`;
     }).join('');
+    const titleBar = document.querySelector('#csStoreTable').closest('.table-card').querySelector('.table-title-bar');
+    const drillLabel = csDrillSubDept || csDrillCategory || null;
+    titleBar.innerHTML = 'Sales per Store' + (drillLabel ? \` <span class="cs-drill-badge" onclick="csClearDrill('all')">Filtered: \${drillLabel} <span class="cs-drill-x">×</span></span>\` : '');
   }
+
+  function csDrillFromCategory(catName) {
+    if (csDrillCategory === catName) { csClearDrill('cat'); return; }
+    csDrillCategory = catName;
+    csDrillSubDept = null;
+    document.getElementById('csBdCategory').value = catName;
+    csRebuildSubDeptDropdown();
+    document.getElementById('csBdSubDept').value = '';
+    renderCsCategoryTable();
+    renderCsDetailTable();
+    loadCategorySales();
+  }
+  function csDrillFromSubDept(subDeptName, catName) {
+    if (csDrillSubDept === subDeptName) { csClearDrill('subdept'); return; }
+    csDrillSubDept = subDeptName;
+    if (catName && !csDrillCategory) csDrillCategory = catName;
+    document.getElementById('csBdCategory').value = csDrillCategory || '';
+    csRebuildSubDeptDropdown();
+    document.getElementById('csBdSubDept').value = subDeptName;
+    renderCsCategoryTable();
+    renderCsDetailTable();
+    loadCategorySales();
+  }
+  function csClearDrill(scope) {
+    if (scope === 'cat' || scope === 'all') { csDrillCategory = null; csDrillSubDept = null; }
+    if (scope === 'subdept') csDrillSubDept = null;
+    document.getElementById('csBdCategory').value = csDrillCategory || '';
+    csRebuildSubDeptDropdown();
+    document.getElementById('csBdSubDept').value = csDrillSubDept || '';
+    renderCsCategoryTable();
+    renderCsDetailTable();
+    loadCategorySales();
+  }
+  window.csClearDrill = csClearDrill;
 
   // Sort click handler for all category sales tables
   document.addEventListener('click', (e) => {
+    // Drill-through: category row click
+    const catRow = e.target.closest('#csCategoryTable tbody tr.cs-drillable');
+    if (catRow && !e.target.closest('th.sortable')) {
+      csDrillFromCategory(catRow.dataset.drillCat);
+      return;
+    }
+    // Drill-through: sub-dept row click
+    const detRow = e.target.closest('#csDetailTable tbody tr.cs-drillable');
+    if (detRow && !e.target.closest('th.sortable')) {
+      csDrillFromSubDept(detRow.dataset.drillSubdept, detRow.dataset.drillCat);
+      return;
+    }
+
     const th = e.target.closest('#csCategoryTable thead th.sortable, #csDetailTable thead th.sortable, #csAreaTable thead th.sortable, #csStoreTable thead th.sortable');
     if (!th || !csCurrentData) return;
     const tableId = th.closest('table').id;
