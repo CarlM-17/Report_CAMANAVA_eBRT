@@ -910,6 +910,124 @@ app.get('/api/shopper-metrics', async (req, res) => {
   }
 });
 
+// Acquisition endpoint - reads Acquisition sheet
+// Columns: A=TYPE, B=AREA, C=STORE ID, D=STORE, E=Month, F=ACQUIRED, G=ACQUIREDLY
+app.get('/api/acquisition', async (req, res) => {
+  try {
+    const scope = getUserScope(req);
+    const monthsRaw = (req.query.months || '').toString();
+    const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const monthSet = new Set(monthArr.map(m => m.toLowerCase()));
+    const hasMonthFilter = monthSet.size > 0;
+
+    const typesRaw = (req.query.types || req.query.type || '').toString();
+    const typeArr = typesRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const typeSet = new Set(typeArr.map(t => t.toLowerCase()));
+    const hasTypeFilter = typeSet.size > 0;
+
+    const areaFilter  = (req.query.area || '').toString().trim().toLowerCase();
+    const storeFilter = (req.query.storeId || '').toString().trim();
+
+    const [rows, storeRows] = await Promise.all([
+      fetchSheet('Acquisition'),
+      fetchSheet('ListOfStores')
+    ]);
+
+    const storeNameMap = {};
+    const storeAreaMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      if (sid) {
+        storeNameMap[sid] = (r[4] || '').trim();
+        storeAreaMap[sid] = (r[2] || '').trim();
+      }
+    });
+
+    const passMonth = (m) => !hasMonthFilter || monthSet.has((m || '').toString().trim().toLowerCase());
+    const passType  = (t) => !hasTypeFilter  || typeSet.has((t || '').toString().trim().toLowerCase());
+    const passArea  = (ar) => {
+      const arL = (ar || '').toString().trim().toLowerCase();
+      if (scope.areaSet && !scope.areaSet.has(arL)) return false;
+      if (areaFilter && arL !== areaFilter) return false;
+      return true;
+    };
+    const passStore = (sid) => {
+      if (scope.storeSet && !scope.storeSet.has(sid)) return false;
+      if (storeFilter && sid !== storeFilter) return false;
+      return true;
+    };
+
+    const byType  = {};   // type -> { acquired, acquiredLY }
+    const byArea  = {};   // area -> { acquired, acquiredLY }
+    const byStore = {};   // storeId -> { storeName, area, acquired, acquiredLY }
+    let total = 0, totalLY = 0;
+    const allTypeSet = new Set();
+
+    rows.slice(1).forEach(cols => {
+      const t   = (cols[0] || '').toString().trim();
+      const sid = (cols[2] || '').toString().trim();
+      const rawStore = (cols[3] || '').toString().trim();
+      const m   = (cols[4] || '').toString().trim();
+      const acq   = num(cols[5]);
+      const acqLY = num(cols[6]);
+      // Always source area from ListOfStores for consistency; fall back to row's own area
+      const ar  = sid ? (storeAreaMap[sid] || (cols[1] || '').toString().trim()) : (cols[1] || '').toString().trim();
+      const sname = sid ? (storeNameMap[sid] || rawStore) : rawStore;
+
+      if (t) allTypeSet.add(t);
+
+      if (!passMonth(m)) return;
+      if (!passArea(ar)) return;
+      if (!passStore(sid)) return;
+      if (!passType(t)) return;
+
+      total   += acq;
+      totalLY += acqLY;
+
+      if (t) {
+        if (!byType[t]) byType[t] = { acquired: 0, acquiredLY: 0 };
+        byType[t].acquired   += acq;
+        byType[t].acquiredLY += acqLY;
+      }
+      if (ar) {
+        if (!byArea[ar]) byArea[ar] = { acquired: 0, acquiredLY: 0 };
+        byArea[ar].acquired   += acq;
+        byArea[ar].acquiredLY += acqLY;
+      }
+      if (sid) {
+        if (!byStore[sid]) byStore[sid] = { storeName: sname, area: ar, acquired: 0, acquiredLY: 0 };
+        byStore[sid].acquired   += acq;
+        byStore[sid].acquiredLY += acqLY;
+      }
+    });
+
+    const diff = (cur, ly) => {
+      const amt = cur - ly;
+      const pct = ly !== 0 ? (amt / Math.abs(ly)) * 100 : null;
+      return { amt, pct };
+    };
+    const enrich = (m) => ({ ...m, diff: diff(m.acquired, m.acquiredLY) });
+
+    const types  = Object.entries(byType).map(([type, m]) => ({ type, ...enrich(m) }))
+                    .sort((a, b) => b.acquired - a.acquired);
+    const areas  = Object.entries(byArea).map(([area, m]) => ({ area, ...enrich(m) }))
+                    .sort((a, b) => b.acquired - a.acquired);
+    const stores = Object.entries(byStore).map(([sid, m]) => ({
+      storeId: sid, storeName: m.storeName, area: m.area, ...enrich(m)
+    })).sort((a, b) => b.acquired - a.acquired);
+
+    res.json({
+      ok: true,
+      filters: { months: monthArr, types: typeArr, area: req.query.area || null, storeId: req.query.storeId || null },
+      summary: { acquired: total, acquiredLY: totalLY, diff: diff(total, totalLY) },
+      types, areas, stores,
+      allTypes: [...allTypeSet].sort()
+    });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/data', async (req, res) => {
   const t0 = Date.now();
   try {
@@ -1634,6 +1752,22 @@ const html = `<!DOCTYPE html>
   .tab-btn.active {
     color: #1B5E20;
     border-bottom-color: #FFC107;
+  }
+  /* SUB-TABS (inside a tab) */
+  .subtabs {
+    display: flex; gap: 4px; margin-bottom: 14px;
+    background: #f0f4f0; border-radius: 10px; padding: 4px;
+    border: 1px solid #e0e6e0; width: fit-content;
+  }
+  .subtab-btn {
+    background: transparent; border: none; color: #4a5a4d;
+    padding: 8px 18px; font-size: 12px; font-weight: 600; cursor: pointer;
+    border-radius: 7px; transition: all 0.15s; letter-spacing: 0.3px;
+  }
+  .subtab-btn:hover { color: #1B5E20; background: rgba(46,125,50,0.06); }
+  .subtab-btn.active {
+    background: #1B5E20; color: white;
+    box-shadow: 0 2px 4px rgba(27,94,32,0.25);
   }
 
   /* CONTENT */
@@ -2832,106 +2966,221 @@ const html = `<!DOCTYPE html>
 <!-- SHOPPER METRICS TAB -->
 <div id="tab-shopper" class="content" style="display:none;">
 
-  <div class="filter-bar">
-    <label>Type</label>
-    <div class="radio-group" id="smTypeRadios">
-      <!-- radio buttons injected here -->
+  <!-- Sub-tabs -->
+  <div class="subtabs">
+    <button class="subtab-btn active" onclick="switchSmSubTab(this,'sales')">Sales</button>
+    <button class="subtab-btn" onclick="switchSmSubTab(this,'bmember')">Buying Member</button>
+    <button class="subtab-btn" onclick="switchSmSubTab(this,'acquisition')">Acquisition</button>
+  </div>
+
+  <!-- ============ SALES SUB-TAB ============ -->
+  <div id="smSub-sales" class="sm-subtab">
+    <div class="filter-bar">
+      <label>Type</label>
+      <div class="radio-group" id="smTypeRadios"></div>
+      <label>Month</label>
+      <div class="multi-select" id="smMsMonth">
+        <button type="button" class="ms-btn" onclick="toggleMs('smMsMonth')">All Months ▾</button>
+        <div class="ms-panel" id="smMsMonthPanel"></div>
+      </div>
+      <label>Area</label>
+      <select id="smAreaFilter"><option value="">All Areas</option></select>
+      <label>Store</label>
+      <select id="smStoreFilter"><option value="">All Stores</option></select>
+      <button class="btn-refresh" id="smRefreshBtn" onclick="loadShopperMetrics()">↻ Refresh</button>
     </div>
-    <label>Month</label>
-    <div class="multi-select" id="smMsMonth">
-      <button type="button" class="ms-btn" onclick="toggleMs('smMsMonth')">All Months ▾</button>
-      <div class="ms-panel" id="smMsMonthPanel"></div>
+
+    <div id="smStatusBar" class="status-bar loading">
+      <span class="spinner"></span> Loading shopper metrics...
     </div>
-    <label>Area</label>
-    <select id="smAreaFilter"><option value="">All Areas</option></select>
-    <label>Store</label>
-    <select id="smStoreFilter"><option value="">All Stores</option></select>
-    <button class="btn-refresh" id="smRefreshBtn" onclick="loadShopperMetrics()">↻ Refresh</button>
-  </div>
 
-  <div id="smStatusBar" class="status-bar loading">
-    <span class="spinner"></span> Loading shopper metrics...
-  </div>
+    <!-- Sales KPIs (4) -->
+    <div class="kpi-grid kpi-grid-6" id="smSalesKpiGrid"></div>
 
-  <!-- KPI Cards (6) -->
-  <div class="kpi-grid kpi-grid-6" id="smKpiGrid"></div>
-
-  <!-- Breakdown by Type chart -->
-  <div class="chart-card" style="margin-top:14px;">
-    <div class="chart-title">Growth per Shopper Metrics · Diff % by Type <span class="type-tag" id="smTypeChartTag"></span></div>
-    <div class="chart-wrap"><canvas id="smChartType"></canvas></div>
-  </div>
-
-  <!-- Per Area Section -->
-  <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Per Area Performance <span class="type-tag" id="smAreaTypeTag"></span></div>
-    <div class="table-wrapper">
-      <table class="cs-table" id="smAreaTable">
-        <thead><tr>
-          <th class="sortable" data-col="area">Area</th>
-          <th class="sortable" data-col="sales">Sales</th>
-          <th class="sortable" data-col="salesLY">Sales LY</th>
-          <th class="sortable" data-col="salesDiffPct">Sales Diff %</th>
-          <th class="sortable" data-col="salesDiffAmt">Sales Diff Val</th>
-          <th class="sortable" data-col="bmember">B.Member</th>
-          <th class="sortable" data-col="bmemberLY">B.Member LY</th>
-          <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
-          <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
-          <th class="sortable" data-col="bmemberAchievement">Target Achievement</th>
-        </tr></thead>
-        <tbody id="smAreaBody"></tbody>
-        <tfoot id="smAreaFoot"></tfoot>
-      </table>
+    <div class="chart-card" style="margin-top:14px;">
+      <div class="chart-title">Sales Growth · Diff % by Type <span class="type-tag" id="smTypeChartTag"></span></div>
+      <div class="chart-wrap"><canvas id="smChartType"></canvas></div>
     </div>
-  </div>
 
-  <div class="cs-charts-row" style="margin-top:8px;">
-    <div class="chart-card">
+    <div class="table-card" style="margin-top:14px;">
+      <div class="table-title-bar">Sales · Per Area <span class="type-tag" id="smAreaTypeTag"></span></div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="smAreaTable">
+          <thead><tr>
+            <th class="sortable" data-col="area">Area</th>
+            <th class="sortable" data-col="sales">Sales</th>
+            <th class="sortable" data-col="salesLY">Sales LY</th>
+            <th class="sortable" data-col="salesDiffPct">Sales Diff %</th>
+            <th class="sortable" data-col="salesDiffAmt">Sales Diff Val</th>
+          </tr></thead>
+          <tbody id="smAreaBody"></tbody>
+          <tfoot id="smAreaFoot"></tfoot>
+        </table>
+      </div>
+    </div>
+
+    <div class="chart-card" style="margin-top:8px;">
       <div class="chart-title">Sales Diff % per Area <span class="type-tag" id="smAreaSalesTypeTag"></span></div>
       <div class="chart-wrap"><canvas id="smChartAreaSales"></canvas></div>
     </div>
-    <div class="chart-card">
+
+    <div class="table-card" style="margin-top:14px;">
+      <div class="table-title-bar">Sales · Per Store <span class="type-tag" id="smStoreTypeTag"></span></div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="smStoreTable">
+          <thead><tr>
+            <th class="sortable" data-col="storeId">Store ID</th>
+            <th class="sortable" data-col="storeName">Store Name</th>
+            <th class="sortable" data-col="area">Area</th>
+            <th class="sortable" data-col="sales">Sales</th>
+            <th class="sortable" data-col="salesLY">Sales LY</th>
+            <th class="sortable" data-col="salesDiffPct">Sales Diff %</th>
+            <th class="sortable" data-col="salesDiffAmt">Sales Diff Val</th>
+          </tr></thead>
+          <tbody id="smStoreBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="chart-card" style="margin-top:14px;">
+      <div class="chart-title">Share of Business (SOB) % by Type</div>
+      <div class="chart-wrap"><canvas id="smChartSobType"></canvas></div>
+    </div>
+    <div class="chart-card" style="margin-top:8px;">
+      <div class="chart-title">Share of Business (SOB) % per Area <span class="type-tag" id="smSobAreaTypeTag"></span></div>
+      <div class="chart-wrap"><canvas id="smChartSobArea"></canvas></div>
+    </div>
+    <div class="chart-card" style="margin-top:8px;">
+      <div class="chart-title">Share of Business (SOB) % per Store <span class="type-tag" id="smSobStoreTypeTag"></span></div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="smChartSobStore"></canvas></div>
+    </div>
+  </div>
+
+  <!-- ============ BUYING MEMBER SUB-TAB ============ -->
+  <div id="smSub-bmember" class="sm-subtab" style="display:none;">
+    <!-- BM KPIs (populated from same data as Sales sub-tab) -->
+    <div class="kpi-grid kpi-grid-6" id="smBmKpiGrid"></div>
+
+    <div class="chart-card" style="margin-top:14px;">
+      <div class="chart-title">B.Member Growth · Diff % by Type <span class="type-tag" id="smBmTypeChartTag"></span></div>
+      <div class="chart-wrap"><canvas id="smBmChartType"></canvas></div>
+    </div>
+
+    <div class="table-card" style="margin-top:14px;">
+      <div class="table-title-bar">Buying Member · Per Area <span class="type-tag" id="smBmAreaTypeTag"></span></div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="smBmAreaTable">
+          <thead><tr>
+            <th class="sortable" data-col="area">Area</th>
+            <th class="sortable" data-col="bmember">B.Member</th>
+            <th class="sortable" data-col="bmemberLY">B.Member LY</th>
+            <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
+            <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
+            <th class="sortable" data-col="bmemberAchievement">Target Achievement</th>
+          </tr></thead>
+          <tbody id="smBmAreaBody"></tbody>
+          <tfoot id="smBmAreaFoot"></tfoot>
+        </table>
+      </div>
+    </div>
+
+    <div class="chart-card" style="margin-top:8px;">
       <div class="chart-title">B.Member Diff % per Area <span class="type-tag" id="smAreaBMTypeTag"></span></div>
       <div class="chart-wrap"><canvas id="smChartAreaBM"></canvas></div>
     </div>
-  </div>
 
-  <!-- Per Store Section -->
-  <div class="table-card" style="margin-top:14px;">
-    <div class="table-title-bar">Per Store Performance <span class="type-tag" id="smStoreTypeTag"></span></div>
-    <div class="table-wrapper">
-      <table class="cs-table" id="smStoreTable">
-        <thead><tr>
-          <th class="sortable" data-col="storeId">Store ID</th>
-          <th class="sortable" data-col="storeName">Store Name</th>
-          <th class="sortable" data-col="area">Area</th>
-          <th class="sortable" data-col="sales">Sales</th>
-          <th class="sortable" data-col="salesLY">Sales LY</th>
-          <th class="sortable" data-col="salesDiffPct">Sales Diff %</th>
-          <th class="sortable" data-col="salesDiffAmt">Sales Diff Val</th>
-          <th class="sortable" data-col="bmember">B.Member</th>
-          <th class="sortable" data-col="bmemberLY">B.Member LY</th>
-          <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
-          <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
-          <th class="sortable" data-col="bmemberAchievement">Target Achievement</th>
-        </tr></thead>
-        <tbody id="smStoreBody"></tbody>
-      </table>
+    <div class="table-card" style="margin-top:14px;">
+      <div class="table-title-bar">Buying Member · Per Store <span class="type-tag" id="smBmStoreTypeTag"></span></div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="smBmStoreTable">
+          <thead><tr>
+            <th class="sortable" data-col="storeId">Store ID</th>
+            <th class="sortable" data-col="storeName">Store Name</th>
+            <th class="sortable" data-col="area">Area</th>
+            <th class="sortable" data-col="bmember">B.Member</th>
+            <th class="sortable" data-col="bmemberLY">B.Member LY</th>
+            <th class="sortable" data-col="bmemberDiffPct">B.Mem Diff %</th>
+            <th class="sortable" data-col="bmemberDiffAmt">B.Mem Diff Val</th>
+            <th class="sortable" data-col="bmemberAchievement">Target Achievement</th>
+          </tr></thead>
+          <tbody id="smBmStoreBody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
-  <!-- Share of Business charts -->
-  <div class="chart-card" style="margin-top:14px;">
-    <div class="chart-title">Share of Business (SOB) % by Type</div>
-    <div class="chart-wrap"><canvas id="smChartSobType"></canvas></div>
-  </div>
-  <div class="chart-card" style="margin-top:8px;">
-    <div class="chart-title">Share of Business (SOB) % per Area <span class="type-tag" id="smSobAreaTypeTag"></span></div>
-    <div class="chart-wrap"><canvas id="smChartSobArea"></canvas></div>
-  </div>
-  <div class="chart-card" style="margin-top:8px;">
-    <div class="chart-title">Share of Business (SOB) % per Store <span class="type-tag" id="smSobStoreTypeTag"></span></div>
-    <div class="chart-wrap chart-wrap-tall"><canvas id="smChartSobStore"></canvas></div>
+  <!-- ============ ACQUISITION SUB-TAB ============ -->
+  <div id="smSub-acquisition" class="sm-subtab" style="display:none;">
+    <div class="filter-bar">
+      <label>Type</label>
+      <div class="radio-group" id="acqTypeRadios"></div>
+      <label>Month</label>
+      <div class="multi-select" id="acqMsMonth">
+        <button type="button" class="ms-btn" onclick="toggleMs('acqMsMonth')">All Months ▾</button>
+        <div class="ms-panel" id="acqMsMonthPanel"></div>
+      </div>
+      <label>Area</label>
+      <select id="acqAreaFilter"><option value="">All Areas</option></select>
+      <label>Store</label>
+      <select id="acqStoreFilter"><option value="">All Stores</option></select>
+      <button class="btn-refresh" id="acqRefreshBtn" onclick="loadAcquisition()">↻ Refresh</button>
+    </div>
+
+    <div id="acqStatusBar" class="status-bar loading">
+      <span class="spinner"></span> Loading acquisition data...
+    </div>
+
+    <div class="kpi-grid kpi-grid-6" id="acqKpiGrid"></div>
+
+    <div class="chart-card" style="margin-top:14px;">
+      <div class="chart-title">Acquisition Growth · Diff % by Type <span class="type-tag" id="acqTypeChartTag"></span></div>
+      <div class="chart-wrap"><canvas id="acqChartType"></canvas></div>
+    </div>
+
+    <div class="table-card" style="margin-top:14px;">
+      <div class="table-title-bar">Acquisition · Per Area <span class="type-tag" id="acqAreaTypeTag"></span></div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="acqAreaTable">
+          <thead><tr>
+            <th class="sortable" data-col="area">Area</th>
+            <th class="sortable" data-col="acquired">Acquired</th>
+            <th class="sortable" data-col="acquiredLY">Acquired LY</th>
+            <th class="sortable" data-col="diffPct">Diff %</th>
+            <th class="sortable" data-col="diffAmt">Diff Value</th>
+          </tr></thead>
+          <tbody id="acqAreaBody"></tbody>
+          <tfoot id="acqAreaFoot"></tfoot>
+        </table>
+      </div>
+    </div>
+
+    <div class="chart-card" style="margin-top:8px;">
+      <div class="chart-title">Acquisition Diff % per Area <span class="type-tag" id="acqAreaChartTag"></span></div>
+      <div class="chart-wrap"><canvas id="acqChartArea"></canvas></div>
+    </div>
+
+    <div class="table-card" style="margin-top:14px;">
+      <div class="table-title-bar">Acquisition · Per Store <span class="type-tag" id="acqStoreTypeTag"></span></div>
+      <div class="table-wrapper">
+        <table class="cs-table" id="acqStoreTable">
+          <thead><tr>
+            <th class="sortable" data-col="storeId">Store ID</th>
+            <th class="sortable" data-col="storeName">Store Name</th>
+            <th class="sortable" data-col="area">Area</th>
+            <th class="sortable" data-col="acquired">Acquired</th>
+            <th class="sortable" data-col="acquiredLY">Acquired LY</th>
+            <th class="sortable" data-col="diffPct">Diff %</th>
+            <th class="sortable" data-col="diffAmt">Diff Value</th>
+          </tr></thead>
+          <tbody id="acqStoreBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="chart-card" style="margin-top:8px;">
+      <div class="chart-title">Acquisition Diff % per Store · Top &amp; Bottom <span class="type-tag" id="acqStoreChartTag"></span></div>
+      <div class="chart-wrap chart-wrap-tall"><canvas id="acqChartStore"></canvas></div>
+    </div>
   </div>
 
 </div>
@@ -4929,8 +5178,10 @@ const html = `<!DOCTYPE html>
   let smCharts = { type: null, areaSales: null, areaBM: null, sobType: null, sobArea: null, sobStore: null };
   let smCurrentData = null;
   let smSorts = {
-    area:  { col: 'sales', asc: false },
-    store: { col: 'sales', asc: false }
+    area:    { col: 'sales', asc: false },
+    store:   { col: 'sales', asc: false },
+    bmArea:  { col: 'bmember', asc: false },
+    bmStore: { col: 'bmember', asc: false }
   };
 
   function smFmt(n) {
@@ -5034,15 +5285,19 @@ const html = `<!DOCTYPE html>
 
       // Set Type tags across tables and charts (not on the Type breakdown chart itself)
       const tag = smSelectedType;
-      ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag','smSobAreaTypeTag','smSobStoreTypeTag'].forEach(id => {
+      ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag','smSobAreaTypeTag','smSobStoreTypeTag',
+       'smBmAreaTypeTag','smBmStoreTypeTag','smBmTypeChartTag'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.textContent = tag;
       });
 
       renderSmKpis(data);
       renderSmTypeChart(data);
+      renderSmBmTypeChart(data);
       renderSmAreaTable();
       renderSmStoreTable();
+      renderSmBmAreaTable();
+      renderSmBmStoreTable();
       renderSmAreaCharts(data);
       renderSmSobCharts(data);
 
@@ -5071,21 +5326,32 @@ const html = `<!DOCTYPE html>
     const signupMonthLabel = s.currentSignupMonth
       ? s.currentSignupMonth.charAt(0).toUpperCase() + s.currentSignupMonth.slice(1)
       : 'latest month';
+    const achCls = s.bmemberAchievement === null ? '' : (s.bmemberAchievement >= 100 ? 'kpi-pos' : 'kpi-neg');
+    const achVal = s.bmemberAchievement === null ? '—' : s.bmemberAchievement.toFixed(2) + '%';
+    const achSub = s.bmemberTarget > 0 ? 'Target: ' + smFmtCountCompact(s.bmemberTarget) : 'no target';
 
-    const cards = [
+    const salesCards = [
       { label: 'Sales',         value: smFmtMoneyCompact(s.sales),     diff: smFmtPct(s.salesDiff.pct),    cls: s.salesDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',    sub: 'vs ' + smFmtMoneyCompact(s.salesLY) + ' LY' },
-      { label: 'B.Member',      value: smFmtCountCompact(s.bmember),    diff: smFmtPct(s.bmemberDiff.pct),  cls: s.bmemberDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',  sub: 'vs ' + smFmtCountCompact(s.bmemberLY) + ' LY' },
       { label: 'TRX Count',     value: smFmtCountCompact(s.trx),        diff: smFmtPct(s.trxDiff.pct),      cls: s.trxDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'vs ' + smFmtCountCompact(s.trxLY) + ' LY' },
-      { label: 'Sign-Up (Current Month)', value: smFmtCountCompact(s.signup), diff: smFmtPct(s.signupDiff.pct), cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg', sub: signupMonthLabel + ' · vs ' + smFmtCountCompact(s.signupLY) + ' LY' },
       { label: 'Sales / Member',value: smFmtMoneyCompact(salesPerMember), diff: smFmtPct(spmDiff),          cls: (spmDiff || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',     sub: 'avg per buying member' },
-      { label: 'Net New Members', value: smFmtSignedInt(netNewMembers), diff: null,                         cls: netNewMembers >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'B.Member − B.Member LY' }
+      { label: 'Sign-Up (Current Month)', value: smFmtCountCompact(s.signup), diff: smFmtPct(s.signupDiff.pct), cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg', sub: signupMonthLabel + ' · vs ' + smFmtCountCompact(s.signupLY) + ' LY' }
     ];
-    document.getElementById('smKpiGrid').innerHTML = cards.map(c => \`
+    const bmCards = [
+      { label: 'B.Member',      value: smFmtCountCompact(s.bmember),    diff: smFmtPct(s.bmemberDiff.pct),  cls: s.bmemberDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',  sub: 'vs ' + smFmtCountCompact(s.bmemberLY) + ' LY' },
+      { label: 'Net New Members', value: smFmtSignedInt(netNewMembers), diff: null,                         cls: netNewMembers >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'B.Member − B.Member LY' },
+      { label: 'Target Achievement', value: achVal,                     diff: null,                         cls: achCls,                                          sub: achSub },
+      { label: 'Sign-Up (Current Month)', value: smFmtCountCompact(s.signup), diff: smFmtPct(s.signupDiff.pct), cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg', sub: signupMonthLabel + ' · vs ' + smFmtCountCompact(s.signupLY) + ' LY' }
+    ];
+    const cardHtml = c => \`
       <div class="kpi-card \${c.cls}">
         <div class="kpi-label">\${c.label}</div>
         <div class="kpi-value">\${c.value}</div>
         <div class="kpi-sub">\${c.diff ? '<b>' + c.diff + '</b> · ' : ''}\${c.sub}</div>
-      </div>\`).join('');
+      </div>\`;
+    const salesGrid = document.getElementById('smSalesKpiGrid');
+    if (salesGrid) salesGrid.innerHTML = salesCards.map(cardHtml).join('');
+    const bmGrid = document.getElementById('smBmKpiGrid');
+    if (bmGrid) bmGrid.innerHTML = bmCards.map(cardHtml).join('');
   }
 
   function smSort(rows, key, asc) {
@@ -5117,44 +5383,24 @@ const html = `<!DOCTYPE html>
     document.getElementById('smAreaBody').innerHTML = rows.map(r => {
       const sdCls = r.salesDiff.pct === null ? '' : (r.salesDiff.pct >= 0 ? 'pos' : 'neg');
       const sdaCls = r.salesDiff.amt >= 0 ? 'pos' : 'neg';
-      const bdCls = r.bmemberDiff.pct === null ? '' : (r.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
-      const bdaCls = r.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
-      const achCls = r.bmemberAchievement === null ? '' : (r.bmemberAchievement >= 100 ? 'pos' : 'neg');
-      const achText = r.bmemberAchievement === null ? '—' : r.bmemberAchievement.toFixed(2) + '%';
-      const achSub = r.bmemberTarget > 0 ? \` <span style="color:#94a094;font-weight:400;font-size:10px;">/ \${smFmtInt(r.bmemberTarget)}</span>\` : '';
       return \`<tr>
         <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area}</span></td>
         <td>\${smFmt(r.sales)}</td>
         <td>\${smFmt(r.salesLY)}</td>
         <td class="\${sdCls}">\${r.salesDiff.pct === null ? '—' : smFmtPct(r.salesDiff.pct)}</td>
         <td class="\${sdaCls}">\${smFmtSigned(r.salesDiff.amt)}</td>
-        <td>\${smFmtInt(r.bmember)}</td>
-        <td>\${smFmtInt(r.bmemberLY)}</td>
-        <td class="\${bdCls}">\${r.bmemberDiff.pct === null ? '—' : smFmtPct(r.bmemberDiff.pct)}</td>
-        <td class="\${bdaCls}">\${smFmtSignedInt(r.bmemberDiff.amt)}</td>
-        <td class="\${achCls}">\${achText}\${achSub}</td>
       </tr>\`;
     }).join('');
 
     const t = smCurrentData.summary;
     const sdCls  = t.salesDiff.pct === null ? '' : (t.salesDiff.pct >= 0 ? 'pos' : 'neg');
     const sdaCls = t.salesDiff.amt >= 0 ? 'pos' : 'neg';
-    const bdCls  = t.bmemberDiff.pct === null ? '' : (t.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
-    const bdaCls = t.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
-    const tAchCls = t.bmemberAchievement === null ? '' : (t.bmemberAchievement >= 100 ? 'pos' : 'neg');
-    const tAchText = t.bmemberAchievement === null ? '—' : t.bmemberAchievement.toFixed(2) + '%';
-    const tAchSub = t.bmemberTarget > 0 ? \` <span style="color:#94a094;font-weight:500;font-size:10px;">/ \${smFmtInt(t.bmemberTarget)}</span>\` : '';
     document.getElementById('smAreaFoot').innerHTML = \`<tr>
       <td class="text-col">TOTAL · \${smCurrentData.areas.length} AREAS</td>
       <td>\${smFmt(t.sales)}</td>
       <td>\${smFmt(t.salesLY)}</td>
       <td class="\${sdCls}">\${t.salesDiff.pct === null ? '—' : smFmtPct(t.salesDiff.pct)}</td>
       <td class="\${sdaCls}">\${smFmtSigned(t.salesDiff.amt)}</td>
-      <td>\${smFmtInt(t.bmember)}</td>
-      <td>\${smFmtInt(t.bmemberLY)}</td>
-      <td class="\${bdCls}">\${t.bmemberDiff.pct === null ? '—' : smFmtPct(t.bmemberDiff.pct)}</td>
-      <td class="\${bdaCls}">\${smFmtSignedInt(t.bmemberDiff.amt)}</td>
-      <td class="\${tAchCls}">\${tAchText}\${tAchSub}</td>
     </tr>\`;
   }
 
@@ -5165,6 +5411,61 @@ const html = `<!DOCTYPE html>
     document.getElementById('smStoreBody').innerHTML = rows.map(r => {
       const sdCls = r.salesDiff.pct === null ? '' : (r.salesDiff.pct >= 0 ? 'pos' : 'neg');
       const sdaCls = r.salesDiff.amt >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col">#\${r.storeId}</td>
+        <td class="text-col">\${r.storeName}</td>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area || '—'}</span></td>
+        <td>\${smFmt(r.sales)}</td>
+        <td>\${smFmt(r.salesLY)}</td>
+        <td class="\${sdCls}">\${r.salesDiff.pct === null ? '—' : smFmtPct(r.salesDiff.pct)}</td>
+        <td class="\${sdaCls}">\${smFmtSigned(r.salesDiff.amt)}</td>
+      </tr>\`;
+    }).join('');
+  }
+
+  function renderSmBmAreaTable() {
+    if (!smCurrentData) return;
+    if (!smSorts.bmArea) smSorts.bmArea = { col: 'bmember', asc: false };
+    const rows = smSort(smCurrentData.areas, smSorts.bmArea.col, smSorts.bmArea.asc);
+    smUpdateSortInd('smBmAreaTable', smSorts.bmArea);
+    document.getElementById('smBmAreaBody').innerHTML = rows.map(r => {
+      const bdCls = r.bmemberDiff.pct === null ? '' : (r.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
+      const bdaCls = r.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+      const achCls = r.bmemberAchievement === null ? '' : (r.bmemberAchievement >= 100 ? 'pos' : 'neg');
+      const achText = r.bmemberAchievement === null ? '—' : r.bmemberAchievement.toFixed(2) + '%';
+      const achSub = r.bmemberTarget > 0 ? \` <span style="color:#94a094;font-weight:400;font-size:10px;">/ \${smFmtInt(r.bmemberTarget)}</span>\` : '';
+      return \`<tr>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area}</span></td>
+        <td>\${smFmtInt(r.bmember)}</td>
+        <td>\${smFmtInt(r.bmemberLY)}</td>
+        <td class="\${bdCls}">\${r.bmemberDiff.pct === null ? '—' : smFmtPct(r.bmemberDiff.pct)}</td>
+        <td class="\${bdaCls}">\${smFmtSignedInt(r.bmemberDiff.amt)}</td>
+        <td class="\${achCls}">\${achText}\${achSub}</td>
+      </tr>\`;
+    }).join('');
+
+    const t = smCurrentData.summary;
+    const bdCls  = t.bmemberDiff.pct === null ? '' : (t.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
+    const bdaCls = t.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
+    const tAchCls = t.bmemberAchievement === null ? '' : (t.bmemberAchievement >= 100 ? 'pos' : 'neg');
+    const tAchText = t.bmemberAchievement === null ? '—' : t.bmemberAchievement.toFixed(2) + '%';
+    const tAchSub = t.bmemberTarget > 0 ? \` <span style="color:#94a094;font-weight:500;font-size:10px;">/ \${smFmtInt(t.bmemberTarget)}</span>\` : '';
+    document.getElementById('smBmAreaFoot').innerHTML = \`<tr>
+      <td class="text-col">TOTAL · \${smCurrentData.areas.length} AREAS</td>
+      <td>\${smFmtInt(t.bmember)}</td>
+      <td>\${smFmtInt(t.bmemberLY)}</td>
+      <td class="\${bdCls}">\${t.bmemberDiff.pct === null ? '—' : smFmtPct(t.bmemberDiff.pct)}</td>
+      <td class="\${bdaCls}">\${smFmtSignedInt(t.bmemberDiff.amt)}</td>
+      <td class="\${tAchCls}">\${tAchText}\${tAchSub}</td>
+    </tr>\`;
+  }
+
+  function renderSmBmStoreTable() {
+    if (!smCurrentData) return;
+    if (!smSorts.bmStore) smSorts.bmStore = { col: 'bmember', asc: false };
+    const rows = smSort(smCurrentData.stores, smSorts.bmStore.col, smSorts.bmStore.asc);
+    smUpdateSortInd('smBmStoreTable', smSorts.bmStore);
+    document.getElementById('smBmStoreBody').innerHTML = rows.map(r => {
       const bdCls = r.bmemberDiff.pct === null ? '' : (r.bmemberDiff.pct >= 0 ? 'pos' : 'neg');
       const bdaCls = r.bmemberDiff.amt >= 0 ? 'pos' : 'neg';
       const achCls = r.bmemberAchievement === null ? '' : (r.bmemberAchievement >= 100 ? 'pos' : 'neg');
@@ -5174,10 +5475,6 @@ const html = `<!DOCTYPE html>
         <td class="text-col">#\${r.storeId}</td>
         <td class="text-col">\${r.storeName}</td>
         <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area || '—'}</span></td>
-        <td>\${smFmt(r.sales)}</td>
-        <td>\${smFmt(r.salesLY)}</td>
-        <td class="\${sdCls}">\${r.salesDiff.pct === null ? '—' : smFmtPct(r.salesDiff.pct)}</td>
-        <td class="\${sdaCls}">\${smFmtSigned(r.salesDiff.amt)}</td>
         <td>\${smFmtInt(r.bmember)}</td>
         <td>\${smFmtInt(r.bmemberLY)}</td>
         <td class="\${bdCls}">\${r.bmemberDiff.pct === null ? '—' : smFmtPct(r.bmemberDiff.pct)}</td>
@@ -5189,15 +5486,19 @@ const html = `<!DOCTYPE html>
 
   // Sort click handler for sm tables
   document.addEventListener('click', (e) => {
-    const th = e.target.closest('#smAreaTable thead th.sortable, #smStoreTable thead th.sortable');
+    const th = e.target.closest('#smAreaTable thead th.sortable, #smStoreTable thead th.sortable, #smBmAreaTable thead th.sortable, #smBmStoreTable thead th.sortable');
     if (!th || !smCurrentData) return;
     const tableId = th.closest('table').id;
     const col = th.dataset.col;
-    const k = tableId === 'smAreaTable' ? 'area' : 'store';
+    const keyMap = { smAreaTable: 'area', smStoreTable: 'store', smBmAreaTable: 'bmArea', smBmStoreTable: 'bmStore' };
+    const k = keyMap[tableId];
+    if (!smSorts[k]) smSorts[k] = { col: 'sales', asc: false };
     if (smSorts[k].col === col) smSorts[k].asc = !smSorts[k].asc;
     else { smSorts[k].col = col; smSorts[k].asc = false; }
-    if (k === 'area') renderSmAreaTable();
-    else renderSmStoreTable();
+    if (k === 'area')    renderSmAreaTable();
+    if (k === 'store')   renderSmStoreTable();
+    if (k === 'bmArea')  renderSmBmAreaTable();
+    if (k === 'bmStore') renderSmBmStoreTable();
   });
 
   function renderSmTypeChart(data) {
@@ -5216,6 +5517,42 @@ const html = `<!DOCTYPE html>
           data: data.types.map(t => t.salesDiff.pct === null ? 0 : t.salesDiff.pct),
           backgroundColor: data.types.map(t => (t.salesDiff.pct >= 0 ? '#66BB6A' : '#EF5350')),
           borderColor: data.types.map(t => (t.salesDiff.pct >= 0 ? GREEN : RED)),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 11, weight: 700 },
+            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 11, weight: 600 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } }
+        }
+      }
+    });
+  }
+
+  function renderSmBmTypeChart(data) {
+    if (smCharts.bmType) smCharts.bmType.destroy();
+    const el = document.getElementById('smBmChartType');
+    if (!el) return;
+    const GREEN = '#1B5E20', RED = '#C62828';
+    smCharts.bmType = new Chart(el, {
+      type: 'bar',
+      data: {
+        labels: data.types.map(t => t.type),
+        datasets: [{
+          label: 'B.Member Diff %',
+          data: data.types.map(t => t.bmemberDiff.pct === null ? 0 : t.bmemberDiff.pct),
+          backgroundColor: data.types.map(t => (t.bmemberDiff.pct >= 0 ? '#66BB6A' : '#EF5350')),
+          borderColor: data.types.map(t => (t.bmemberDiff.pct >= 0 ? GREEN : RED)),
           borderWidth: 1.5
         }]
       },
@@ -5356,6 +5693,295 @@ const html = `<!DOCTYPE html>
       storesSorted.map(s => s.sob),
       true
     );
+  }
+  // ============ SUB-TAB SWITCHER ============
+  function switchSmSubTab(btn, sub) {
+    document.querySelectorAll('#tab-shopper .subtab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('#tab-shopper .sm-subtab').forEach(el => el.style.display = 'none');
+    const target = document.getElementById('smSub-' + sub);
+    if (target) target.style.display = '';
+    if (sub === 'acquisition') {
+      if (!acqFiltersLoaded) loadAcqFilters().then(() => loadAcquisition());
+      else if (!acqCurrentData) loadAcquisition();
+    }
+  }
+  window.switchSmSubTab = switchSmSubTab;
+
+  // ============ ACQUISITION ============
+  let acqFiltersLoaded = false;
+  let acqCurrentData = null;
+  let acqSelectedType = 'TNAP';
+  let acqCharts = { type: null, area: null, store: null };
+  let acqSorts = { area: { col: 'acquired', asc: false }, store: { col: 'acquired', asc: false } };
+
+  function acqFmtInt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return Math.round(n).toLocaleString('en-PH');
+  }
+  function acqFmtSignedInt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + Math.round(n).toLocaleString('en-PH');
+  }
+  function acqFmtPct(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+  }
+  function acqFmtCountCompact(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    const abs = Math.abs(n);
+    const sign = n < 0 ? '-' : '';
+    if (abs >= 1e6) return sign + (abs/1e6).toFixed(2) + 'M';
+    if (abs >= 1e3) return sign + (abs/1e3).toFixed(1) + 'K';
+    return sign + Math.round(abs).toLocaleString('en-PH');
+  }
+
+  function buildAcqTypeRadios(types) {
+    const box = document.getElementById('acqTypeRadios');
+    if (!box) return;
+    const list = types && types.length ? types : ['TNAP','PERKS','KAIN'];
+    if (!list.includes(acqSelectedType)) acqSelectedType = list[0];
+    box.innerHTML = list.map(t => \`
+      <label class="radio-item">
+        <input type="radio" name="acqType" value="\${t}" \${t === acqSelectedType ? 'checked' : ''}
+               onchange="acqSetType('\${t}')" /> \${t}
+      </label>\`).join('');
+  }
+  function acqSetType(t) {
+    acqSelectedType = t;
+    loadAcquisition();
+  }
+  window.acqSetType = acqSetType;
+
+  async function loadAcqFilters() {
+    if (acqFiltersLoaded) return;
+    try {
+      const res = await fetch('/api/filters');
+      const f = await res.json();
+      if (!f.ok) return;
+      buildAcqTypeRadios(['TNAP','PERKS','KAIN']);
+      buildMsPanel('acqMsMonth', f.months, 'All Months');
+      const areaSel = document.getElementById('acqAreaFilter');
+      f.areas.forEach(a => areaSel.innerHTML += \`<option value="\${a}">\${a}</option>\`);
+      const storeSel = document.getElementById('acqStoreFilter');
+      f.stores.forEach(s => storeSel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} - \${s.name}</option>\`);
+      areaSel.addEventListener('change', loadAcquisition);
+      storeSel.addEventListener('change', loadAcquisition);
+      acqFiltersLoaded = true;
+    } catch (e) { console.error('acq filter load failed', e); }
+  }
+
+  async function loadAcquisition() {
+    const btn = document.getElementById('acqRefreshBtn');
+    const status = document.getElementById('acqStatusBar');
+    btn.classList.add('loading'); btn.textContent = '⏳ Loading...';
+    status.className = 'status-bar loading';
+    status.innerHTML = '<span class="spinner"></span> Loading acquisition data...';
+    try {
+      const months = getMsValues('acqMsMonth');
+      const areaV  = document.getElementById('acqAreaFilter').value;
+      const storeV = document.getElementById('acqStoreFilter').value;
+      const params = new URLSearchParams();
+      if (months.length) params.set('months', months.join(','));
+      params.set('types', acqSelectedType);
+      if (areaV)  params.set('area', areaV);
+      if (storeV) params.set('storeId', storeV);
+      const res = await fetch('/api/acquisition?' + params.toString());
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+      acqCurrentData = data;
+
+      // Refresh type radios with actual types from data if available
+      if (data.allTypes && data.allTypes.length) buildAcqTypeRadios(data.allTypes);
+
+      const tag = acqSelectedType;
+      ['acqTypeChartTag','acqAreaTypeTag','acqAreaChartTag','acqStoreTypeTag','acqStoreChartTag'].forEach(id => {
+        const el = document.getElementById(id); if (el) el.textContent = tag;
+      });
+
+      renderAcqKpis(data);
+      renderAcqTypeChart(data);
+      renderAcqAreaTable();
+      renderAcqStoreTable();
+      renderAcqAreaChart(data);
+      renderAcqStoreChart(data);
+
+      status.className = 'status-bar';
+      const parts = ['Type: ' + acqSelectedType];
+      if (months.length) parts.push(months.length <= 3 ? 'Months: ' + months.join(', ') : 'Months: ' + months.length + ' selected');
+      if (areaV)  parts.push('Area: ' + areaV);
+      if (storeV) parts.push('Store: ' + storeV);
+      status.innerHTML = \`✅ \${parts.join(' · ')} · \${data.areas.length} areas · \${data.stores.length} stores · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+    } catch (err) {
+      status.className = 'status-bar error';
+      status.innerHTML = '❌ Error: ' + err.message;
+    } finally {
+      btn.classList.remove('loading'); btn.textContent = '↻ Refresh';
+    }
+  }
+  window.loadAcquisition = loadAcquisition;
+
+  function renderAcqKpis(data) {
+    const s = data.summary;
+    const netNew = s.acquired - s.acquiredLY;
+    const cards = [
+      { label: 'Acquired',    value: acqFmtCountCompact(s.acquired),   diff: acqFmtPct(s.diff.pct),
+        cls: s.diff.pct >= 0 ? 'kpi-pos' : 'kpi-neg', sub: 'vs ' + acqFmtCountCompact(s.acquiredLY) + ' LY' },
+      { label: 'Acquired LY', value: acqFmtCountCompact(s.acquiredLY), diff: null, cls: '', sub: 'same period last year' },
+      { label: 'Diff Value',  value: acqFmtSignedInt(s.diff.amt),      diff: null,
+        cls: s.diff.amt >= 0 ? 'kpi-pos' : 'kpi-neg', sub: 'net change vs LY' },
+      { label: 'Net New',     value: acqFmtSignedInt(netNew),          diff: null,
+        cls: netNew >= 0 ? 'kpi-pos' : 'kpi-neg', sub: 'Acquired − Acquired LY' }
+    ];
+    document.getElementById('acqKpiGrid').innerHTML = cards.map(c => \`
+      <div class="kpi-card \${c.cls}">
+        <div class="kpi-label">\${c.label}</div>
+        <div class="kpi-value">\${c.value}</div>
+        <div class="kpi-sub">\${c.diff ? '<b>' + c.diff + '</b> · ' : ''}\${c.sub}</div>
+      </div>\`).join('');
+  }
+
+  function acqSort(rows, key, asc) {
+    return rows.slice().sort((a, b) => {
+      let va, vb;
+      if (key === 'diffPct')      { va = a.diff.pct; vb = b.diff.pct; }
+      else if (key === 'diffAmt') { va = a.diff.amt; vb = b.diff.amt; }
+      else { va = a[key]; vb = b[key]; }
+      if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      if (va === null || isNaN(va)) va = asc ? Infinity : -Infinity;
+      if (vb === null || isNaN(vb)) vb = asc ? Infinity : -Infinity;
+      return asc ? va - vb : vb - va;
+    });
+  }
+  function acqUpdateSortInd(tableId, s) {
+    document.querySelectorAll('#' + tableId + ' thead th.sortable').forEach(th => {
+      th.classList.remove('sort-asc','sort-desc');
+      if (th.dataset.col === s.col) th.classList.add(s.asc ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  function renderAcqAreaTable() {
+    if (!acqCurrentData) return;
+    const rows = acqSort(acqCurrentData.areas, acqSorts.area.col, acqSorts.area.asc);
+    acqUpdateSortInd('acqAreaTable', acqSorts.area);
+    document.getElementById('acqAreaBody').innerHTML = rows.map(r => {
+      const dpCls = r.diff.pct === null ? '' : (r.diff.pct >= 0 ? 'pos' : 'neg');
+      const daCls = r.diff.amt >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area}</span></td>
+        <td>\${acqFmtInt(r.acquired)}</td>
+        <td>\${acqFmtInt(r.acquiredLY)}</td>
+        <td class="\${dpCls}">\${r.diff.pct === null ? '—' : acqFmtPct(r.diff.pct)}</td>
+        <td class="\${daCls}">\${acqFmtSignedInt(r.diff.amt)}</td>
+      </tr>\`;
+    }).join('');
+    const t = acqCurrentData.summary;
+    const dpCls = t.diff.pct === null ? '' : (t.diff.pct >= 0 ? 'pos' : 'neg');
+    const daCls = t.diff.amt >= 0 ? 'pos' : 'neg';
+    document.getElementById('acqAreaFoot').innerHTML = \`<tr>
+      <td class="text-col">TOTAL · \${acqCurrentData.areas.length} AREAS</td>
+      <td>\${acqFmtInt(t.acquired)}</td>
+      <td>\${acqFmtInt(t.acquiredLY)}</td>
+      <td class="\${dpCls}">\${t.diff.pct === null ? '—' : acqFmtPct(t.diff.pct)}</td>
+      <td class="\${daCls}">\${acqFmtSignedInt(t.diff.amt)}</td>
+    </tr>\`;
+  }
+
+  function renderAcqStoreTable() {
+    if (!acqCurrentData) return;
+    const rows = acqSort(acqCurrentData.stores, acqSorts.store.col, acqSorts.store.asc);
+    acqUpdateSortInd('acqStoreTable', acqSorts.store);
+    document.getElementById('acqStoreBody').innerHTML = rows.map(r => {
+      const dpCls = r.diff.pct === null ? '' : (r.diff.pct >= 0 ? 'pos' : 'neg');
+      const daCls = r.diff.amt >= 0 ? 'pos' : 'neg';
+      return \`<tr>
+        <td class="text-col">#\${r.storeId}</td>
+        <td class="text-col">\${r.storeName}</td>
+        <td class="text-col"><span class="area-badge" style="background:\${csAreaColor(r.area)}">\${r.area || '—'}</span></td>
+        <td>\${acqFmtInt(r.acquired)}</td>
+        <td>\${acqFmtInt(r.acquiredLY)}</td>
+        <td class="\${dpCls}">\${r.diff.pct === null ? '—' : acqFmtPct(r.diff.pct)}</td>
+        <td class="\${daCls}">\${acqFmtSignedInt(r.diff.amt)}</td>
+      </tr>\`;
+    }).join('');
+  }
+
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('#acqAreaTable thead th.sortable, #acqStoreTable thead th.sortable');
+    if (!th || !acqCurrentData) return;
+    const tableId = th.closest('table').id;
+    const col = th.dataset.col;
+    const k = tableId === 'acqAreaTable' ? 'area' : 'store';
+    if (acqSorts[k].col === col) acqSorts[k].asc = !acqSorts[k].asc;
+    else { acqSorts[k].col = col; acqSorts[k].asc = false; }
+    if (k === 'area') renderAcqAreaTable(); else renderAcqStoreTable();
+  });
+
+  function acqDiffBar(canvasId, labels, pctData, horizontal) {
+    const GREEN = '#1B5E20', RED = '#C62828';
+    return new Chart(document.getElementById(canvasId), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Diff %',
+          data: pctData.map(v => v === null ? 0 : v),
+          backgroundColor: pctData.map(v => (v >= 0 ? '#66BB6A' : '#EF5350')),
+          borderColor: pctData.map(v => (v >= 0 ? GREEN : RED)),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        indexAxis: horizontal ? 'y' : 'x',
+        layout: { padding: horizontal ? { right: 40 } : { top: 22 } },
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: horizontal ? 4 : 2, clamp: true,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 10, weight: 700 },
+            formatter: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        },
+        scales: horizontal ? {
+          x: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } },
+          y: { ticks: { color: '#333', font: { size: 9, weight: 500 }, autoSkip: false }, grid: { display: false } }
+        } : {
+          x: { ticks: { color: '#555', font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } }
+        }
+      }
+    });
+  }
+  function renderAcqTypeChart(data) {
+    if (acqCharts.type) acqCharts.type.destroy();
+    acqCharts.type = acqDiffBar('acqChartType',
+      data.types.map(t => t.type),
+      data.types.map(t => t.diff.pct),
+      false);
+  }
+  function renderAcqAreaChart(data) {
+    if (acqCharts.area) acqCharts.area.destroy();
+    const sorted = [...data.areas].sort((a,b) => (b.diff.pct || 0) - (a.diff.pct || 0));
+    acqCharts.area = acqDiffBar('acqChartArea',
+      sorted.map(a => a.area),
+      sorted.map(a => a.diff.pct),
+      false);
+  }
+  function renderAcqStoreChart(data) {
+    if (acqCharts.store) acqCharts.store.destroy();
+    // Top 10 + Bottom 10 by diff %
+    const withPct = data.stores.filter(s => s.diff.pct !== null);
+    const top = [...withPct].sort((a,b) => b.diff.pct - a.diff.pct).slice(0, 10);
+    const bot = [...withPct].sort((a,b) => a.diff.pct - b.diff.pct).slice(0, 10).reverse();
+    const merged = [...top, ...bot];
+    const wrap = document.getElementById('acqChartStore').closest('.chart-wrap');
+    if (wrap) wrap.style.height = Math.max(340, merged.length * 26 + 60) + 'px';
+    acqCharts.store = acqDiffBar('acqChartStore',
+      merged.map(s => s.storeName),
+      merged.map(s => s.diff.pct),
+      true);
   }
   // ============ END SHOPPER METRICS ============
 
