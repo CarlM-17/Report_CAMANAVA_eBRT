@@ -816,6 +816,7 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const signupByMonth   = {};   // monthLower -> total signup current
     const signupLYByMonth = {};   // monthLower -> total signup LY
     const byMonth = {};           // monthLower -> emptyMetric (respects type/area/store filters)
+    const targetByMonth = {};     // monthLower -> sum of monthly targets for selected type/scope
     const monthOrder = ['january','february','march','april','may','june','july','august','september','october','november','december'];
     const monthLabels = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -897,6 +898,7 @@ app.get('/api/shopper-metrics', async (req, res) => {
           const mk = m.toLowerCase();
           if (!byMonth[mk]) byMonth[mk] = emptyMetric();
           addFromCols(byMonth[mk], cols, T);
+          if (T.TARGET >= 0) targetByMonth[mk] = (targetByMonth[mk] || 0) + num(cols[T.TARGET]);
         }
       });
     } else {
@@ -936,6 +938,18 @@ app.get('/api/shopper-metrics', async (req, res) => {
           const mk = m.toLowerCase();
           if (!byMonth[mk]) byMonth[mk] = emptyMetric();
           addFromCols(byMonth[mk], cols, cm);
+          // Per-month target — treat area/store targets as MONTHLY; add per qualifying row
+          if (selectedType) {
+            if (scopedSource.hasStore) {
+              const tgtKey = sid + '|' + selectedType;
+              const tgt = targetByStore[tgtKey] || 0;
+              if (tgt > 0) targetByMonth[mk] = (targetByMonth[mk] || 0) + tgt;
+            } else {
+              const tgtKey = ar.toLowerCase() + '|' + selectedType;
+              const tgt = targetByArea[tgtKey] || 0;
+              if (tgt > 0) targetByMonth[mk] = (targetByMonth[mk] || 0) + tgt;
+            }
+          }
         }
       });
     }
@@ -1019,6 +1033,23 @@ app.get('/api/shopper-metrics', async (req, res) => {
     }
     const totalBmemberAchievement = totalBmemberTarget > 0 ? (total.bmember / totalBmemberTarget) * 100 : null;
 
+    // Achievement for the most recent COMPLETE month (excludes current in-progress month)
+    let lastCompleteAchievementPct = null;
+    let lastCompleteMonthLabel = null;
+    let lastCompleteBmember = 0;
+    let lastCompleteTarget = 0;
+    for (let i = monthOrder.length - 1; i >= 0; i--) {
+      const mk = monthOrder[i];
+      if (mk === currentMonthKey) continue;
+      if (!byMonth[mk]) continue;
+      const tgt = targetByMonth[mk] || 0;
+      lastCompleteBmember = byMonth[mk].bmember;
+      lastCompleteTarget  = tgt;
+      lastCompleteAchievementPct = tgt > 0 ? (byMonth[mk].bmember / tgt) * 100 : null;
+      lastCompleteMonthLabel = monthLabels[i];
+      break;
+    }
+
     // Monthly trend: ordered by calendar; identify latest present month (current, likely incomplete)
     const monthlyMonthsPresent = Object.keys(byMonth);
     let currentMonthKey = null;
@@ -1029,14 +1060,14 @@ app.get('/api/shopper-metrics', async (req, res) => {
         if (idx > bestIdx) { bestIdx = idx; currentMonthKey = mk; }
       });
     }
-    const monthlyTarget = totalBmemberTarget > 0 ? (totalBmemberTarget / 12) : 0;
     const monthlyTrend = monthOrder
       .map((mk, i) => {
         if (!byMonth[mk]) return null;
         const m = byMonth[mk];
         const sd = diff(m.sales, m.salesLY);
         const bd = diff(m.bmember, m.bmemberLY);
-        const ach = monthlyTarget > 0 ? (m.bmember / monthlyTarget) * 100 : null;
+        const mTgt = targetByMonth[mk] || 0;
+        const ach = mTgt > 0 ? (m.bmember / mTgt) * 100 : null;
         return {
           month: monthLabels[i],
           monthKey: mk,
@@ -1047,6 +1078,7 @@ app.get('/api/shopper-metrics', async (req, res) => {
           bmember: m.bmember,
           bmemberLY: m.bmemberLY,
           bmemberDiffPct: bd.pct,
+          bmemberTarget: mTgt,
           bmemberAchievementPct: ach,
           isCurrent: mk === currentMonthKey
         };
@@ -1056,13 +1088,19 @@ app.get('/api/shopper-metrics', async (req, res) => {
     res.json({
       ok: true,
       filters: { months: monthArr, types: typeArr, area: req.query.area || null, storeId: req.query.storeId || null },
-      summary: { ...enrich(total), bmemberTarget: totalBmemberTarget, bmemberAchievement: totalBmemberAchievement },
+      summary: { ...enrich(total),
+        bmemberTarget: totalBmemberTarget,
+        bmemberAchievement: totalBmemberAchievement,
+        lastCompleteAchievementPct,
+        lastCompleteMonthLabel,
+        lastCompleteBmember,
+        lastCompleteTarget },
       types: typesData,
       areas: areasData,
       stores: storesData,
       monthlyTrend,
       currentMonthKey,
-      monthlyBmemberTarget: monthlyTarget,
+      monthlyBmemberTargetByMonth: targetByMonth,
       allTypes: [...allTypeSet].sort(),
       columnsFound: Object.fromEntries(Object.entries(C).map(([k, v]) => [k, v >= 0]))
     });
@@ -5504,9 +5542,13 @@ const html = `<!DOCTYPE html>
     const signupMonthLabel = s.currentSignupMonth
       ? s.currentSignupMonth.charAt(0).toUpperCase() + s.currentSignupMonth.slice(1)
       : 'latest month';
-    const achCls = s.bmemberAchievement === null ? '' : (s.bmemberAchievement >= 100 ? 'kpi-pos' : 'kpi-neg');
-    const achVal = s.bmemberAchievement === null ? '—' : s.bmemberAchievement.toFixed(2) + '%';
-    const achSub = s.bmemberTarget > 0 ? 'Target: ' + smFmtCountCompact(s.bmemberTarget) : 'no target';
+    // Target Achievement card = most recent COMPLETE month (excludes in-progress current month)
+    const achPct = s.lastCompleteAchievementPct;
+    const achCls = achPct === null || achPct === undefined ? '' : (achPct >= 100 ? 'kpi-pos' : 'kpi-neg');
+    const achVal = achPct === null || achPct === undefined ? '—' : achPct.toFixed(2) + '%';
+    const achSub = s.lastCompleteMonthLabel
+      ? 'as of ' + s.lastCompleteMonthLabel + (s.lastCompleteTarget > 0 ? ' · Target: ' + smFmtCountCompact(s.lastCompleteTarget) : '')
+      : (s.bmemberTarget > 0 ? 'Target: ' + smFmtCountCompact(s.bmemberTarget) : 'no target');
 
     const salesCards = [
       { label: 'Sales',         value: smFmtMoneyCompact(s.sales),     diff: smFmtPct(s.salesDiff.pct),    cls: s.salesDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',    sub: 'vs ' + smFmtMoneyCompact(s.salesLY) + ' LY' },
