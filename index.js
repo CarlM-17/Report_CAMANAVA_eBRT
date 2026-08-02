@@ -1033,6 +1033,17 @@ app.get('/api/shopper-metrics', async (req, res) => {
     }
     const totalBmemberAchievement = totalBmemberTarget > 0 ? (total.bmember / totalBmemberTarget) * 100 : null;
 
+    // Monthly trend: ordered by calendar; identify latest present month (current, likely incomplete)
+    const monthlyMonthsPresent = Object.keys(byMonth);
+    let currentMonthKey = null;
+    if (monthlyMonthsPresent.length) {
+      let bestIdx = -1;
+      monthlyMonthsPresent.forEach(mk => {
+        const idx = monthOrder.indexOf(mk);
+        if (idx > bestIdx) { bestIdx = idx; currentMonthKey = mk; }
+      });
+    }
+
     // Achievement for the most recent COMPLETE month (excludes current in-progress month)
     let lastCompleteAchievementPct = null;
     let lastCompleteMonthLabel = null;
@@ -1048,17 +1059,6 @@ app.get('/api/shopper-metrics', async (req, res) => {
       lastCompleteAchievementPct = tgt > 0 ? (byMonth[mk].bmember / tgt) * 100 : null;
       lastCompleteMonthLabel = monthLabels[i];
       break;
-    }
-
-    // Monthly trend: ordered by calendar; identify latest present month (current, likely incomplete)
-    const monthlyMonthsPresent = Object.keys(byMonth);
-    let currentMonthKey = null;
-    if (monthlyMonthsPresent.length) {
-      let bestIdx = -1;
-      monthlyMonthsPresent.forEach(mk => {
-        const idx = monthOrder.indexOf(mk);
-        if (idx > bestIdx) { bestIdx = idx; currentMonthKey = mk; }
-      });
     }
     const monthlyTrend = monthOrder
       .map((mk, i) => {
