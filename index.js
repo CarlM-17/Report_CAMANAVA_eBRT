@@ -780,7 +780,9 @@ app.get('/api/shopper-metrics', async (req, res) => {
     // Sign-up tracked per month (current-month-only logic applied later)
     const signupByMonth   = {};   // monthLower -> total signup current
     const signupLYByMonth = {};   // monthLower -> total signup LY
+    const byMonth = {};           // monthLower -> emptyMetric (respects type/area/store filters)
     const monthOrder = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+    const monthLabels = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
     rows.slice(1).forEach(cols => {
       const t   = C.TYPE      >= 0 ? (cols[C.TYPE]      || '').toString().trim() : '';
@@ -812,6 +814,13 @@ app.get('/api/shopper-metrics', async (req, res) => {
         const mk = m.toLowerCase();
         signupByMonth[mk]   = (signupByMonth[mk]   || 0) + num(cols[C.SIGNUP]);
         if (C.SIGNUPLY >= 0) signupLYByMonth[mk] = (signupLYByMonth[mk] || 0) + num(cols[C.SIGNUPLY]);
+      }
+
+      // Per-month aggregation (respects type/area/store filters, ignores month filter for trend)
+      if (m) {
+        const mk = m.toLowerCase();
+        if (!byMonth[mk]) byMonth[mk] = emptyMetric();
+        addMetric(byMonth[mk], cols);
       }
 
       if (ar) {
@@ -895,6 +904,40 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const totalBmemberTarget = areasData.reduce((s, r) => s + (r.bmemberTarget || 0), 0);
     const totalBmemberAchievement = totalBmemberTarget > 0 ? (total.bmember / totalBmemberTarget) * 100 : null;
 
+    // Monthly trend: ordered by calendar; identify latest present month (current, likely incomplete)
+    const monthlyMonthsPresent = Object.keys(byMonth);
+    let currentMonthKey = null;
+    if (monthlyMonthsPresent.length) {
+      let bestIdx = -1;
+      monthlyMonthsPresent.forEach(mk => {
+        const idx = monthOrder.indexOf(mk);
+        if (idx > bestIdx) { bestIdx = idx; currentMonthKey = mk; }
+      });
+    }
+    const monthlyTarget = totalBmemberTarget > 0 ? (totalBmemberTarget / 12) : 0;
+    const monthlyTrend = monthOrder
+      .map((mk, i) => {
+        if (!byMonth[mk]) return null;
+        const m = byMonth[mk];
+        const sd = diff(m.sales, m.salesLY);
+        const bd = diff(m.bmember, m.bmemberLY);
+        const ach = monthlyTarget > 0 ? (m.bmember / monthlyTarget) * 100 : null;
+        return {
+          month: monthLabels[i],
+          monthKey: mk,
+          order: i,
+          sales: m.sales,
+          salesLY: m.salesLY,
+          salesDiffPct: sd.pct,
+          bmember: m.bmember,
+          bmemberLY: m.bmemberLY,
+          bmemberDiffPct: bd.pct,
+          bmemberAchievementPct: ach,
+          isCurrent: mk === currentMonthKey
+        };
+      })
+      .filter(Boolean);
+
     res.json({
       ok: true,
       filters: { months: monthArr, types: typeArr, area: req.query.area || null, storeId: req.query.storeId || null },
@@ -902,6 +945,9 @@ app.get('/api/shopper-metrics', async (req, res) => {
       types: typesData,
       areas: areasData,
       stores: storesData,
+      monthlyTrend,
+      currentMonthKey,
+      monthlyBmemberTarget: monthlyTarget,
       allTypes: [...allTypeSet].sort(),
       columnsFound: Object.fromEntries(Object.entries(C).map(([k, v]) => [k, v >= 0]))
     });
@@ -979,16 +1025,20 @@ app.get('/api/acquisition', async (req, res) => {
       if (!passMonth(m)) return;
       if (!passArea(ar)) return;
       if (!passStore(sid)) return;
-      if (!passType(t)) return;
 
-      total   += acq;
-      totalLY += acqLY;
-
+      // byType aggregation ignores type filter so chart always shows all types
       if (t) {
         if (!byType[t]) byType[t] = { acquired: 0, acquiredLY: 0 };
         byType[t].acquired   += acq;
         byType[t].acquiredLY += acqLY;
       }
+
+      // Remaining aggregations honor type filter
+      if (!passType(t)) return;
+
+      total   += acq;
+      totalLY += acqLY;
+
       if (ar) {
         if (!byArea[ar]) byArea[ar] = { acquired: 0, acquiredLY: 0 };
         byArea[ar].acquired   += acq;
@@ -2973,33 +3023,39 @@ const html = `<!DOCTYPE html>
     <button class="subtab-btn" onclick="switchSmSubTab(this,'acquisition')">Acquisition</button>
   </div>
 
+  <!-- Shared filter bar for Sales & Buying Member sub-tabs -->
+  <div id="smSharedFilterBar" class="filter-bar">
+    <label>Type</label>
+    <div class="radio-group" id="smTypeRadios"></div>
+    <label>Month</label>
+    <div class="multi-select" id="smMsMonth">
+      <button type="button" class="ms-btn" onclick="toggleMs('smMsMonth')">All Months ▾</button>
+      <div class="ms-panel" id="smMsMonthPanel"></div>
+    </div>
+    <label>Area</label>
+    <select id="smAreaFilter"><option value="">All Areas</option></select>
+    <label>Store</label>
+    <select id="smStoreFilter"><option value="">All Stores</option></select>
+    <button class="btn-refresh" id="smRefreshBtn" onclick="loadShopperMetrics()">↻ Refresh</button>
+  </div>
+
+  <div id="smStatusBar" class="status-bar loading">
+    <span class="spinner"></span> Loading shopper metrics...
+  </div>
+
   <!-- ============ SALES SUB-TAB ============ -->
   <div id="smSub-sales" class="sm-subtab">
-    <div class="filter-bar">
-      <label>Type</label>
-      <div class="radio-group" id="smTypeRadios"></div>
-      <label>Month</label>
-      <div class="multi-select" id="smMsMonth">
-        <button type="button" class="ms-btn" onclick="toggleMs('smMsMonth')">All Months ▾</button>
-        <div class="ms-panel" id="smMsMonthPanel"></div>
-      </div>
-      <label>Area</label>
-      <select id="smAreaFilter"><option value="">All Areas</option></select>
-      <label>Store</label>
-      <select id="smStoreFilter"><option value="">All Stores</option></select>
-      <button class="btn-refresh" id="smRefreshBtn" onclick="loadShopperMetrics()">↻ Refresh</button>
-    </div>
-
-    <div id="smStatusBar" class="status-bar loading">
-      <span class="spinner"></span> Loading shopper metrics...
-    </div>
-
     <!-- Sales KPIs (4) -->
     <div class="kpi-grid kpi-grid-6" id="smSalesKpiGrid"></div>
 
     <div class="chart-card" style="margin-top:14px;">
       <div class="chart-title">Sales Growth · Diff % by Type <span class="type-tag" id="smTypeChartTag"></span></div>
       <div class="chart-wrap"><canvas id="smChartType"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="margin-top:8px;">
+      <div class="chart-title">Monthly Sales Trend · Diff % <span class="type-tag" id="smSalesTrendTag"></span></div>
+      <div class="chart-wrap"><canvas id="smChartSalesTrend"></canvas></div>
     </div>
 
     <div class="table-card" style="margin-top:14px;">
@@ -3064,6 +3120,11 @@ const html = `<!DOCTYPE html>
     <div class="chart-card" style="margin-top:14px;">
       <div class="chart-title">B.Member Growth · Diff % by Type <span class="type-tag" id="smBmTypeChartTag"></span></div>
       <div class="chart-wrap"><canvas id="smBmChartType"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="margin-top:8px;">
+      <div class="chart-title">Buying Member Target Achievement Trend · % <span class="type-tag" id="smBmTargetTrendTag"></span></div>
+      <div class="chart-wrap"><canvas id="smChartBmTarget"></canvas></div>
     </div>
 
     <div class="table-card" style="margin-top:14px;">
@@ -5286,7 +5347,7 @@ const html = `<!DOCTYPE html>
       // Set Type tags across tables and charts (not on the Type breakdown chart itself)
       const tag = smSelectedType;
       ['smAreaTypeTag','smStoreTypeTag','smAreaSalesTypeTag','smAreaBMTypeTag','smSobAreaTypeTag','smSobStoreTypeTag',
-       'smBmAreaTypeTag','smBmStoreTypeTag','smBmTypeChartTag'].forEach(id => {
+       'smBmAreaTypeTag','smBmStoreTypeTag','smBmTypeChartTag','smSalesTrendTag','smBmTargetTrendTag'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.textContent = tag;
       });
@@ -5294,6 +5355,8 @@ const html = `<!DOCTYPE html>
       renderSmKpis(data);
       renderSmTypeChart(data);
       renderSmBmTypeChart(data);
+      renderSmSalesTrendChart(data);
+      renderSmBmTargetTrendChart(data);
       renderSmAreaTable();
       renderSmStoreTable();
       renderSmBmAreaTable();
@@ -5575,6 +5638,83 @@ const html = `<!DOCTYPE html>
     });
   }
 
+  function renderSmSalesTrendChart(data) {
+    if (smCharts.salesTrend) smCharts.salesTrend.destroy();
+    const el = document.getElementById('smChartSalesTrend');
+    if (!el) return;
+    const trend = data.monthlyTrend || [];
+    const GREEN = '#1B5E20', RED = '#C62828';
+    smCharts.salesTrend = new Chart(el, {
+      type: 'bar',
+      data: {
+        labels: trend.map(t => t.month),
+        datasets: [{
+          label: 'Sales Diff %',
+          data: trend.map(t => t.salesDiffPct === null ? 0 : t.salesDiffPct),
+          backgroundColor: trend.map(t => (t.salesDiffPct >= 0 ? '#66BB6A' : '#EF5350')),
+          borderColor: trend.map(t => (t.salesDiffPct >= 0 ? GREEN : RED)),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 0 ? GREEN : RED,
+            font: { size: 10, weight: 700 },
+            formatter: v => v === null || v === 0 ? '' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%'
+          }
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10, weight: 600 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } }
+        }
+      }
+    });
+  }
+
+  function renderSmBmTargetTrendChart(data) {
+    if (smCharts.bmTarget) smCharts.bmTarget.destroy();
+    const el = document.getElementById('smChartBmTarget');
+    if (!el) return;
+    // Exclude the current (incomplete) month
+    const trend = (data.monthlyTrend || []).filter(t => !t.isCurrent);
+    const GREEN = '#1B5E20', LIGHT = '#66BB6A', RED = '#C62828';
+    smCharts.bmTarget = new Chart(el, {
+      type: 'bar',
+      data: {
+        labels: trend.map(t => t.month),
+        datasets: [{
+          label: 'Target Achievement %',
+          data: trend.map(t => t.bmemberAchievementPct === null ? 0 : t.bmemberAchievementPct),
+          backgroundColor: trend.map(t => (t.bmemberAchievementPct >= 100 ? LIGHT : '#EF5350')),
+          borderColor: trend.map(t => (t.bmemberAchievementPct >= 100 ? GREEN : RED)),
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        layout: { padding: { top: 22 } },
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', offset: 2, clamp: true,
+            color: ctx => ctx.dataset.data[ctx.dataIndex] >= 100 ? GREEN : RED,
+            font: { size: 10, weight: 700 },
+            formatter: v => v === null || v === 0 ? '' : v.toFixed(2) + '%'
+          },
+          annotation: undefined
+        },
+        scales: {
+          x: { ticks: { color: '#555', font: { size: 10, weight: 600 } }, grid: { display: false } },
+          y: { ticks: { color: '#555', font: { size: 10 }, callback: v => v + '%' }, grid: { color: '#eee' } }
+        }
+      }
+    });
+  }
+
   function smDiffBarChart(canvasId, labels, pctData) {
     const GREEN = '#1B5E20', RED = '#C62828';
     return new Chart(document.getElementById(canvasId), {
@@ -5701,7 +5841,13 @@ const html = `<!DOCTYPE html>
     document.querySelectorAll('#tab-shopper .sm-subtab').forEach(el => el.style.display = 'none');
     const target = document.getElementById('smSub-' + sub);
     if (target) target.style.display = '';
-    if (sub === 'acquisition') {
+    // Show shared filter bar + status for Sales/BM; hide for Acquisition (has its own)
+    const sharedBar = document.getElementById('smSharedFilterBar');
+    const sharedStatus = document.getElementById('smStatusBar');
+    const isAcq = sub === 'acquisition';
+    if (sharedBar) sharedBar.style.display = isAcq ? 'none' : '';
+    if (sharedStatus) sharedStatus.style.display = isAcq ? 'none' : '';
+    if (isAcq) {
       if (!acqFiltersLoaded) loadAcqFilters().then(() => loadAcquisition());
       else if (!acqCurrentData) loadAcquisition();
     }
