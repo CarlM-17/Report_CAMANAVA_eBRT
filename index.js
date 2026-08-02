@@ -639,12 +639,14 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const typeSet = new Set(typeArr.map(t => t.toLowerCase()));
     const hasTypeFilter = typeSet.size > 0;
 
-    const [rows, storeRows, storeTargetRows, areaTargetRows, salesDataRows] = await Promise.all([
+    const [rows, storeRows, storeTargetRows, areaTargetRows, salesDataRows, areaRows, totalRows] = await Promise.all([
       fetchSheet('ShopperMetricsData'),
       fetchSheet('ListOfStores'),
       fetchSheet('ShopperMetricsTarget'),
       fetchSheet('AreaShopperTarget'),
-      fetchSheet(SHEET_NAME)
+      fetchSheet(SHEET_NAME),
+      fetchSheet('AreaShopperMetrics'),
+      fetchSheet('ShopperMetricsTotal')
     ]);
 
     // Store lookup
@@ -732,6 +734,29 @@ app.get('/api/shopper-metrics', async (req, res) => {
       targetByArea[k] = (targetByArea[k] || 0) + tgt;
     });
 
+    // ===== Column detection for AreaShopperMetrics + ShopperMetricsTotal =====
+    const A = (() => {
+      const tc = buildTCol(areaRows);
+      return {
+        TYPE: tc('TYPE'), AREA: tc('Area'), MONTH: tc('Month'),
+        SALES: tc('Sales'), SALESLY: tc('SalesLY'),
+        BMEMBER: tc('B.Member','BMember'), BMEMBERLY: tc('B.MemberLY','BMemberLY'),
+        TRX: tc('TRXCount'), TRXLY: tc('TRXCountLY'),
+        SIGNUP: tc('Sign-Up','SignUp'), SIGNUPLY: tc('Sign-UpLY','SignUpLY')
+      };
+    })();
+    const T = (() => {
+      const tc = buildTCol(totalRows);
+      return {
+        REGION: tc('Region'), TYPE: tc('TYPE'), MONTH: tc('MONTH','Month'),
+        SALES: tc('NET SALES','NETSALES','Sales'), SALESLY: tc('LY SALES','LY Sales','SalesLY'),
+        BMEMBER: tc('BUYING MEMBERS','BUYINGMEMBERS','B.Member'), BMEMBERLY: tc('LY B.Members','LY B.Member','BMemberLY'),
+        TRX: tc('TRX COUNT','TRXCount'), TRXLY: tc('LY TRX Count','LY TRXCount','TRXCountLY'),
+        SIGNUP: tc('SIGN-UP MEMBERS','SIGNUPMEMBERS','Sign-Up'), SIGNUPLY: tc('LY Sign up','LY SignUp','Sign-UpLY'),
+        TARGET: tc('Target')
+      };
+    })();
+
     const selectedType = (typeArr[0] || '').toUpperCase();
 
     // ===== SalesData (for SOB denominator) =====
@@ -759,23 +784,33 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const passType  = (t) => !hasTypeFilter  || typeSet.has((t || '').toString().trim().toLowerCase());
     const passArea  = (ar) => !scope.areaSet  || scope.areaSet.has((ar || '').toString().trim().toLowerCase());
     const passStore = (sid) => !scope.storeSet || scope.storeSet.has(sid);
+    // Area filter from query (used to scope totals+trend when user picks a specific area)
+    const areaFilterQ  = (req.query.area || '').toString().trim().toLowerCase();
+    const storeFilterQ = (req.query.storeId || '').toString().trim();
+    const hasAreaFilter  = !!areaFilterQ;
+    const hasStoreFilter = !!storeFilterQ;
+    const passAreaFilter  = (ar) => !hasAreaFilter  || (ar || '').toString().trim().toLowerCase() === areaFilterQ;
+    const passStoreFilter = (sid) => !hasStoreFilter || sid === storeFilterQ;
 
     const emptyMetric = () => ({ sales: 0, salesLY: 0, bmember: 0, bmemberLY: 0, trx: 0, trxLY: 0, signup: 0, signupLY: 0 });
-    const addMetric = (target, cols) => {
-      if (C.SALES     >= 0) target.sales     += num(cols[C.SALES]);
-      if (C.SALESLY   >= 0) target.salesLY   += num(cols[C.SALESLY]);
-      if (C.BMEMBER   >= 0) target.bmember   += num(cols[C.BMEMBER]);
-      if (C.BMEMBERLY >= 0) target.bmemberLY += num(cols[C.BMEMBERLY]);
-      if (C.TRX       >= 0) target.trx       += num(cols[C.TRX]);
-      if (C.TRXLY     >= 0) target.trxLY     += num(cols[C.TRXLY]);
-      if (C.SIGNUP    >= 0) target.signup    += num(cols[C.SIGNUP]);
-      if (C.SIGNUPLY  >= 0) target.signupLY  += num(cols[C.SIGNUPLY]);
+
+    // Add metric for a given sheet using its column map (C / A / T)
+    const addFromCols = (target, cols, cm) => {
+      if (cm.SALES     >= 0) target.sales     += num(cols[cm.SALES]);
+      if (cm.SALESLY   >= 0) target.salesLY   += num(cols[cm.SALESLY]);
+      if (cm.BMEMBER   >= 0) target.bmember   += num(cols[cm.BMEMBER]);
+      if (cm.BMEMBERLY >= 0) target.bmemberLY += num(cols[cm.BMEMBERLY]);
+      if (cm.TRX       >= 0) target.trx       += num(cols[cm.TRX]);
+      if (cm.TRXLY     >= 0) target.trxLY     += num(cols[cm.TRXLY]);
+      if (cm.SIGNUP    >= 0) target.signup    += num(cols[cm.SIGNUP]);
+      if (cm.SIGNUPLY  >= 0) target.signupLY  += num(cols[cm.SIGNUPLY]);
     };
 
     const byType  = {};
     const byArea  = {};
     const byStore = {};
     const total = emptyMetric();
+    let totalTargetFromTotalSheet = 0;   // sum of Target column from ShopperMetricsTotal for selected type(s)
     const allTypeSet = new Set();
     // Sign-up tracked per month (current-month-only logic applied later)
     const signupByMonth   = {};   // monthLower -> total signup current
@@ -784,61 +819,126 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const monthOrder = ['january','february','march','april','may','june','july','august','september','october','november','december'];
     const monthLabels = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
+    // ===== byStore from ShopperMetricsData (unchanged source) =====
     rows.slice(1).forEach(cols => {
       const t   = C.TYPE      >= 0 ? (cols[C.TYPE]      || '').toString().trim() : '';
       const m   = C.MONTH     >= 0 ? (cols[C.MONTH]     || '').toString().trim() : '';
       const sid = C.STOREID   >= 0 ? (cols[C.STOREID]   || '').toString().trim() : '';
-      // Area always sourced from ListOfStores (ignore SMD's area column to avoid mismatches)
       const ar  = sid ? (storeAreaMap[sid] || '') : '';
 
       if (t) allTypeSet.add(t);
 
-      // Apply month, area, store filters
       if (!passMonth(m)) return;
       if (!passArea(ar)) return;
       if (!passStore(sid)) return;
-
-      // byType - ignores type filter (so user always sees all 4 types)
-      if (t) {
-        if (!byType[t]) byType[t] = emptyMetric();
-        addMetric(byType[t], cols);
-      }
-
-      // Other aggregations honor type filter
+      if (!passAreaFilter(ar)) return;
+      if (!passStoreFilter(sid)) return;
       if (!passType(t)) return;
 
-      addMetric(total, cols);
-
-      // Track sign-up per month for current-month-only logic
-      if (m && C.SIGNUP >= 0) {
-        const mk = m.toLowerCase();
-        signupByMonth[mk]   = (signupByMonth[mk]   || 0) + num(cols[C.SIGNUP]);
-        if (C.SIGNUPLY >= 0) signupLYByMonth[mk] = (signupLYByMonth[mk] || 0) + num(cols[C.SIGNUPLY]);
+      if (sid) {
+        if (!byStore[sid]) {
+          byStore[sid] = { storeName: storeNameMap[sid] || sid, area: ar, ...emptyMetric() };
+        }
+        addFromCols(byStore[sid], cols, C);
       }
+    });
 
-      // Per-month aggregation (respects type/area/store filters, ignores month filter for trend)
-      if (m) {
-        const mk = m.toLowerCase();
-        if (!byMonth[mk]) byMonth[mk] = emptyMetric();
-        addMetric(byMonth[mk], cols);
-      }
+    // ===== byArea from AreaShopperMetrics =====
+    areaRows.slice(1).forEach(cols => {
+      if (!cols) return;
+      const t  = A.TYPE  >= 0 ? (cols[A.TYPE]  || '').toString().trim() : '';
+      const m  = A.MONTH >= 0 ? (cols[A.MONTH] || '').toString().trim() : '';
+      const ar = A.AREA  >= 0 ? (cols[A.AREA]  || '').toString().trim() : '';
+
+      if (t) allTypeSet.add(t);
+
+      if (!passMonth(m)) return;
+      if (!passArea(ar)) return;
+      if (!passAreaFilter(ar)) return;
+      // If a store filter is active we can't map to a specific store from this sheet -> skip area aggregation
+      if (hasStoreFilter) return;
+      if (!passType(t)) return;
 
       if (ar) {
         if (!byArea[ar]) byArea[ar] = emptyMetric();
-        addMetric(byArea[ar], cols);
-      }
-      if (sid) {
-        if (!byStore[sid]) {
-          byStore[sid] = {
-            // Store name always from ListOfStores (SMD names too long)
-            storeName: storeNameMap[sid] || sid,
-            area: ar,
-            ...emptyMetric()
-          };
-        }
-        addMetric(byStore[sid], cols);
+        addFromCols(byArea[ar], cols, A);
       }
     });
+
+    // ===== byType, byMonth, total, target from ShopperMetricsTotal =====
+    // Fall back to summing area/store rows when scope/filters restrict beyond region
+    const useTotalSheet = !hasStoreFilter && !hasAreaFilter && !scope.areaSet && !scope.storeSet;
+
+    if (useTotalSheet) {
+      totalRows.slice(1).forEach(cols => {
+        if (!cols) return;
+        const t = T.TYPE  >= 0 ? (cols[T.TYPE]  || '').toString().trim() : '';
+        const m = T.MONTH >= 0 ? (cols[T.MONTH] || '').toString().trim() : '';
+        if (t) allTypeSet.add(t);
+        if (!passMonth(m)) return;
+
+        // byType ignores type filter so chart shows all types
+        if (t) {
+          if (!byType[t]) byType[t] = emptyMetric();
+          addFromCols(byType[t], cols, T);
+        }
+
+        if (!passType(t)) return;
+
+        addFromCols(total, cols, T);
+        if (T.TARGET >= 0) totalTargetFromTotalSheet += num(cols[T.TARGET]);
+
+        if (m && T.SIGNUP >= 0) {
+          const mk = m.toLowerCase();
+          signupByMonth[mk]   = (signupByMonth[mk]   || 0) + num(cols[T.SIGNUP]);
+          if (T.SIGNUPLY >= 0) signupLYByMonth[mk] = (signupLYByMonth[mk] || 0) + num(cols[T.SIGNUPLY]);
+        }
+        if (m) {
+          const mk = m.toLowerCase();
+          if (!byMonth[mk]) byMonth[mk] = emptyMetric();
+          addFromCols(byMonth[mk], cols, T);
+        }
+      });
+    } else {
+      // Scoped/filtered: derive from AreaShopperMetrics (or ShopperMetricsData when a store filter is active)
+      const scopedSource = hasStoreFilter ? { rows: rows, cm: C, hasStore: true } : { rows: areaRows, cm: A, hasStore: false };
+      scopedSource.rows.slice(1).forEach(cols => {
+        if (!cols) return;
+        const cm = scopedSource.cm;
+        const t  = cm.TYPE  >= 0 ? (cols[cm.TYPE]  || '').toString().trim() : '';
+        const m  = cm.MONTH >= 0 ? (cols[cm.MONTH] || '').toString().trim() : '';
+        const ar = scopedSource.hasStore
+          ? ((cm.STOREID >= 0 ? storeAreaMap[(cols[cm.STOREID] || '').toString().trim()] : '') || '')
+          : (cm.AREA >= 0 ? (cols[cm.AREA] || '').toString().trim() : '');
+        const sid = scopedSource.hasStore && cm.STOREID >= 0 ? (cols[cm.STOREID] || '').toString().trim() : '';
+
+        if (t) allTypeSet.add(t);
+        if (!passMonth(m)) return;
+        if (!passArea(ar)) return;
+        if (scopedSource.hasStore && !passStore(sid)) return;
+        if (!passAreaFilter(ar)) return;
+        if (scopedSource.hasStore && !passStoreFilter(sid)) return;
+
+        if (t) {
+          if (!byType[t]) byType[t] = emptyMetric();
+          addFromCols(byType[t], cols, cm);
+        }
+
+        if (!passType(t)) return;
+        addFromCols(total, cols, cm);
+
+        if (m && cm.SIGNUP >= 0) {
+          const mk = m.toLowerCase();
+          signupByMonth[mk]   = (signupByMonth[mk]   || 0) + num(cols[cm.SIGNUP]);
+          if (cm.SIGNUPLY >= 0) signupLYByMonth[mk] = (signupLYByMonth[mk] || 0) + num(cols[cm.SIGNUPLY]);
+        }
+        if (m) {
+          const mk = m.toLowerCase();
+          if (!byMonth[mk]) byMonth[mk] = emptyMetric();
+          addFromCols(byMonth[mk], cols, cm);
+        }
+      });
+    }
 
     const diff = (cur, ly) => {
       const amt = cur - ly;
@@ -900,8 +1000,23 @@ app.get('/api/shopper-metrics', async (req, res) => {
       };
     }).sort((a, b) => b.sales - a.sales);
 
-    // Totals for B.Member target across selection
-    const totalBmemberTarget = areasData.reduce((s, r) => s + (r.bmemberTarget || 0), 0);
+    // Totals for B.Member target
+    // Prefer ShopperMetricsTotal column V when using the total sheet; otherwise sum area targets in scope
+    let totalBmemberTarget = 0;
+    if (useTotalSheet && T.TARGET >= 0 && totalTargetFromTotalSheet > 0) {
+      totalBmemberTarget = totalTargetFromTotalSheet;
+    } else if (selectedType) {
+      // Sum AreaShopperTarget entries matching the selected type, restricted to scope + area filter
+      Object.entries(targetByArea).forEach(([k, v]) => {
+        const [arL, ty] = k.split('|');
+        if (ty !== selectedType) return;
+        if (scope.areaSet && !scope.areaSet.has(arL)) return;
+        if (hasAreaFilter && arL !== areaFilterQ) return;
+        totalBmemberTarget += v;
+      });
+    } else {
+      totalBmemberTarget = areasData.reduce((s, r) => s + (r.bmemberTarget || 0), 0);
+    }
     const totalBmemberAchievement = totalBmemberTarget > 0 ? (total.bmember / totalBmemberTarget) * 100 : null;
 
     // Monthly trend: ordered by calendar; identify latest present month (current, likely incomplete)
