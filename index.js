@@ -1033,16 +1033,9 @@ app.get('/api/shopper-metrics', async (req, res) => {
     }
     const totalBmemberAchievement = totalBmemberTarget > 0 ? (total.bmember / totalBmemberTarget) * 100 : null;
 
-    // Monthly trend: ordered by calendar; identify latest present month (current, likely incomplete)
-    const monthlyMonthsPresent = Object.keys(byMonth);
-    let currentMonthKey = null;
-    if (monthlyMonthsPresent.length) {
-      let bestIdx = -1;
-      monthlyMonthsPresent.forEach(mk => {
-        const idx = monthOrder.indexOf(mk);
-        if (idx > bestIdx) { bestIdx = idx; currentMonthKey = mk; }
-      });
-    }
+    // Current calendar month (the only one considered "in progress"). Prior months are complete
+    // even if they happen to be the latest present in the data.
+    const currentMonthKey = monthOrder[new Date().getMonth()];
 
     // Achievement for the most recent COMPLETE month (excludes current in-progress month)
     let lastCompleteAchievementPct = null;
