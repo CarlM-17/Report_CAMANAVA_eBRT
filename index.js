@@ -809,6 +809,8 @@ app.get('/api/shopper-metrics', async (req, res) => {
     const byType  = {};
     const byArea  = {};
     const byStore = {};
+    const bmemberByStoreMonth = {}; // sid -> { monthLower: bmember }
+    const bmemberByAreaMonth  = {}; // area -> { monthLower: bmember }
     const total = emptyMetric();
     let totalTargetFromTotalSheet = 0;   // sum of Target column from ShopperMetricsTotal for selected type(s)
     const allTypeSet = new Set();
@@ -841,6 +843,12 @@ app.get('/api/shopper-metrics', async (req, res) => {
           byStore[sid] = { storeName: storeNameMap[sid] || sid, area: ar, ...emptyMetric() };
         }
         addFromCols(byStore[sid], cols, C);
+        // Per-store per-month B.Member for "last complete month" achievement
+        if (m && C.BMEMBER >= 0) {
+          const mk = m.toLowerCase();
+          if (!bmemberByStoreMonth[sid]) bmemberByStoreMonth[sid] = {};
+          bmemberByStoreMonth[sid][mk] = (bmemberByStoreMonth[sid][mk] || 0) + num(cols[C.BMEMBER]);
+        }
       }
     });
 
@@ -863,6 +871,11 @@ app.get('/api/shopper-metrics', async (req, res) => {
       if (ar) {
         if (!byArea[ar]) byArea[ar] = emptyMetric();
         addFromCols(byArea[ar], cols, A);
+        if (m && A.BMEMBER >= 0) {
+          const mk = m.toLowerCase();
+          if (!bmemberByAreaMonth[ar]) bmemberByAreaMonth[ar] = {};
+          bmemberByAreaMonth[ar][mk] = (bmemberByAreaMonth[ar][mk] || 0) + num(cols[A.BMEMBER]);
+        }
       }
     });
 
@@ -992,25 +1005,53 @@ app.get('/api/shopper-metrics', async (req, res) => {
       signupDiff:   diff(m.signup, m.signupLY)
     });
 
+    // Helper: latest complete month key for a given per-month map (walks back from current calendar month)
+    const nowMonthIdx = new Date().getMonth();
+    const lastCompleteFor = (perMonthMap) => {
+      if (!perMonthMap) return null;
+      for (let i = nowMonthIdx - 1; i >= 0; i--) {
+        const mk = monthOrder[i];
+        if (perMonthMap[mk] !== undefined) return mk;
+      }
+      // fallback: any earlier month (handles cross-year edge case)
+      for (let i = 11; i >= nowMonthIdx; i--) {
+        const mk = monthOrder[i];
+        if (perMonthMap[mk] !== undefined) return mk;
+      }
+      return null;
+    };
+
     const typesData  = Object.entries(byType).map(([type, m]) => ({
       type, ...enrich(m),
       sob: totalSalesMTD > 0 ? (m.sales / totalSalesMTD) * 100 : null
     })).sort((a, b) => b.sales - a.sales);
     const areasData  = Object.entries(byArea).map(([area, m]) => {
       const tgt = selectedType ? (targetByArea[area.toLowerCase() + '|' + selectedType] || 0) : 0;
-      const ach = tgt > 0 ? (m.bmember / tgt) * 100 : null;
+      // Achievement = latest COMPLETE month's B.Member / monthly target
+      const perMonth = bmemberByAreaMonth[area] || null;
+      const lastMk  = lastCompleteFor(perMonth);
+      const lastBm  = lastMk ? perMonth[lastMk] : 0;
+      const ach = tgt > 0 && lastMk ? (lastBm / tgt) * 100 : null;
       const denom = salesMTDByArea[area] || 0;
       const sob = denom > 0 ? (m.sales / denom) * 100 : null;
-      return { area, ...enrich(m), bmemberTarget: tgt, bmemberAchievement: ach, sob };
+      return { area, ...enrich(m), bmemberTarget: tgt, bmemberAchievement: ach,
+               bmemberAchievementMonth: lastMk ? monthLabels[monthOrder.indexOf(lastMk)] : null,
+               bmemberAchievementMonthBm: lastBm, sob };
     }).sort((a, b) => b.sales - a.sales);
     const storesData = Object.entries(byStore).map(([sid, m]) => {
       const tgt = selectedType ? (targetByStore[sid + '|' + selectedType] || 0) : 0;
-      const ach = tgt > 0 ? (m.bmember / tgt) * 100 : null;
+      // Achievement = latest COMPLETE month's B.Member / monthly target (per store)
+      const perMonth = bmemberByStoreMonth[sid] || null;
+      const lastMk  = lastCompleteFor(perMonth);
+      const lastBm  = lastMk ? perMonth[lastMk] : 0;
+      const ach = tgt > 0 && lastMk ? (lastBm / tgt) * 100 : null;
       const denom = salesMTDByStore[sid] || 0;
       const sob = denom > 0 ? (m.sales / denom) * 100 : null;
       return {
         storeId: sid, storeName: m.storeName, area: m.area, ...enrich(m),
-        bmemberTarget: tgt, bmemberAchievement: ach, sob
+        bmemberTarget: tgt, bmemberAchievement: ach,
+        bmemberAchievementMonth: lastMk ? monthLabels[monthOrder.indexOf(lastMk)] : null,
+        bmemberAchievementMonthBm: lastBm, sob
       };
     }).sort((a, b) => b.sales - a.sales);
 
