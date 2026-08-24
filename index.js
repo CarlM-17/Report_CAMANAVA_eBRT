@@ -3893,12 +3893,18 @@ const html = `<!DOCTYPE html>
           trx: null, basket: null
         };
         return \`
-          \${metricsRow('UnCarded with Unusual', uncardedWithUnusual)}
+          \${metricsRow('UnCarded with Unusual', uncardedWithUnusual,
+            sob(uncardedWithUnusual.sales.current, totalSalesCur),
+            sob(uncardedWithUnusual.sales.yearAgo, totalSalesYA))}
           \${salesOnlyRow('UnUsual Transaction', d.unusual,
             sob(d.unusual.sales.current, totalSalesCur),
             sob(d.unusual.sales.yearAgo, totalSalesYA))}
-          \${metricsRow('Total Uncarded', totalUncarded)}
-          \${salesOnlyRow('Net of Unusual', netOfUnusual, null, null, 'highlight-green')}
+          \${metricsRow('Total Uncarded', totalUncarded,
+            sob(totalUncarded.sales.current, totalSalesCur),
+            sob(totalUncarded.sales.yearAgo, totalSalesYA))}
+          \${salesOnlyRow('Net of Unusual', netOfUnusual,
+            sob(netOfUnusual.sales.current, totalSalesCur),
+            sob(netOfUnusual.sales.yearAgo, totalSalesYA), 'highlight-green')}
         \`;
       })()}
     \`;
