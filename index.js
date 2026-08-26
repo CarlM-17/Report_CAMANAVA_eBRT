@@ -1145,6 +1145,87 @@ app.get('/api/shopper-metrics', async (req, res) => {
 
 // Acquisition endpoint - reads Acquisition sheet
 // Columns: A=TYPE, B=AREA, C=STORE ID, D=STORE, E=Month, F=ACQUIRED, G=ACQUIREDLY
+// Store Profile endpoint - reads StoreProfile sheet
+// Columns: A=Area, B=Store ID, C=Store Name, D=SellingArea Size, E=WareHouseSize,
+//   F=Rent, G=Rent with VAT, H=CUSA, I=Date Opened, J=Leased Contract, K=Leased Type,
+//   L=Format, M=Matrix, N=No. POS Counter, O=No. of Tenant, P=Population,
+//   Q=No. of Barangay, R=Income Class, S=Store hours, T=SG Service Provider,
+//   U=I.S. Service Provider, V=Competitor 1, W=Competitor 2, X=Competitor 3
+app.get('/api/store-profile', async (req, res) => {
+  try {
+    const scope = getUserScope(req);
+    const [rows, storeRows] = await Promise.all([
+      fetchSheet('StoreProfile'),
+      fetchSheet('ListOfStores')
+    ]);
+    const storeNameMap = {};
+    const storeAreaMap = {};
+    storeRows.slice(1).forEach(r => {
+      const sid = (r[3] || '').trim();
+      if (sid) {
+        storeNameMap[sid] = (r[4] || '').trim();
+        storeAreaMap[sid] = (r[2] || '').trim();
+      }
+    });
+
+    const stores = [];
+    const areaSet = new Set();
+    rows.slice(1).forEach(cols => {
+      if (!cols) return;
+      const sid = (cols[1] || '').toString().trim();
+      if (!sid) return;
+      const rawArea = (cols[0] || '').toString().trim();
+      // Prefer canonical area from ListOfStores, fall back to raw
+      const area = storeAreaMap[sid] || rawArea;
+      const rawName = (cols[2] || '').toString().trim();
+      const name = storeNameMap[sid] || rawName;
+
+      // scope filter
+      if (scope.areaSet && !scope.areaSet.has((area || '').toLowerCase())) return;
+      if (scope.storeSet && !scope.storeSet.has(sid)) return;
+
+      if (area) areaSet.add(area);
+
+      stores.push({
+        area,
+        storeId: sid,
+        storeName: name,
+        sellingArea:      num(cols[3]),
+        warehouseSize:    num(cols[4]),
+        rent:             num(cols[5]),
+        rentWithVat:      num(cols[6]),
+        cusa:             num(cols[7]),
+        dateOpened:       (cols[8]  || '').toString().trim(),
+        leasedContract:   (cols[9]  || '').toString().trim(),
+        leasedType:       (cols[10] || '').toString().trim(),
+        format:           (cols[11] || '').toString().trim(),
+        matrix:           (cols[12] || '').toString().trim(),
+        posCounters:      num(cols[13]),
+        tenants:          num(cols[14]),
+        population:       num(cols[15]),
+        barangays:        num(cols[16]),
+        incomeClass:      (cols[17] || '').toString().trim(),
+        storeHours:       (cols[18] || '').toString().trim(),
+        sgProvider:       (cols[19] || '').toString().trim(),
+        isProvider:       (cols[20] || '').toString().trim(),
+        competitor1:      (cols[21] || '').toString().trim(),
+        competitor2:      (cols[22] || '').toString().trim(),
+        competitor3:      (cols[23] || '').toString().trim()
+      });
+    });
+
+    stores.sort((a, b) => (a.area || '').localeCompare(b.area || '') || (a.storeName || '').localeCompare(b.storeName || ''));
+
+    res.json({
+      ok: true,
+      stores,
+      allAreas: [...areaSet].sort()
+    });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/acquisition', async (req, res) => {
   try {
     const scope = getUserScope(req);
@@ -2571,6 +2652,170 @@ const html = `<!DOCTYPE html>
   }
   .fin-glossary-note strong { color: #1B5E20; }
 
+  /* ============ STORE PROFILE TAB ============ */
+  .sp-shell {
+    display: grid; grid-template-columns: 320px 1fr; gap: 16px;
+    align-items: start;
+  }
+  .sp-list-panel {
+    background: white; border-radius: 12px; border: 1px solid #e5e8e5;
+    overflow: hidden; position: sticky; top: 10px; max-height: calc(100vh - 80px);
+    display: flex; flex-direction: column;
+  }
+  .sp-list-header {
+    padding: 12px 14px; border-bottom: 1px solid #eef0ee;
+    background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 100%);
+    color: white;
+  }
+  .sp-list-header .sp-title {
+    font-size: 12px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase;
+  }
+  .sp-list-header .sp-meta { font-size: 10.5px; opacity: 0.85; margin-top: 2px; }
+  .sp-filters {
+    padding: 10px 12px; border-bottom: 1px solid #eef0ee; background: #fafbfa;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .sp-search {
+    width: 100%; padding: 8px 12px; font-size: 12px;
+    border: 1px solid #d4dad4; border-radius: 8px; background: white;
+    color: #1a2e1f; outline: none;
+  }
+  .sp-search:focus { border-color: #2E7D32; box-shadow: 0 0 0 3px rgba(46,125,50,0.1); }
+  .sp-area-select {
+    width: 100%; padding: 7px 10px; font-size: 12px;
+    border: 1px solid #d4dad4; border-radius: 8px; background: white;
+    color: #1a2e1f; cursor: pointer; outline: none;
+  }
+  .sp-list { overflow-y: auto; padding: 6px; flex: 1; }
+  .sp-list-item {
+    padding: 10px 12px; border-radius: 8px; cursor: pointer;
+    transition: all 0.12s; margin-bottom: 3px;
+    border: 1px solid transparent;
+  }
+  .sp-list-item:hover { background: #f0f6f0; }
+  .sp-list-item.active {
+    background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%);
+    border-color: #66BB6A;
+  }
+  .sp-list-item .sp-li-name {
+    font-size: 12.5px; font-weight: 700; color: #1a2e1f;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .sp-list-item .sp-li-id {
+    font-size: 10px; font-weight: 600; color: #5a6b5e;
+    background: #eef2ee; padding: 2px 7px; border-radius: 10px;
+  }
+  .sp-list-item.active .sp-li-id { background: white; color: #1B5E20; }
+  .sp-list-item .sp-li-area {
+    font-size: 10.5px; color: #6a7a6d; margin-top: 3px; font-weight: 500;
+  }
+  .sp-empty-list {
+    padding: 24px 16px; text-align: center; color: #8a9a8d; font-size: 12px;
+  }
+
+  .sp-detail {
+    background: white; border-radius: 12px; border: 1px solid #e5e8e5;
+    overflow: hidden;
+  }
+  .sp-detail-empty {
+    padding: 60px 20px; text-align: center; color: #8a9a8d; font-size: 13px;
+  }
+  .sp-hero {
+    padding: 20px 24px;
+    background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 50%, #43A047 100%);
+    color: white; position: relative;
+  }
+  .sp-hero::after {
+    content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 220px;
+    background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='80' cy='20' r='40' fill='white' opacity='0.06'/><circle cx='60' cy='60' r='30' fill='white' opacity='0.05'/></svg>") no-repeat right center;
+    background-size: cover; pointer-events: none;
+  }
+  .sp-hero-top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; position: relative; z-index: 1;
+  }
+  .sp-hero-name {
+    font-size: 22px; font-weight: 800; letter-spacing: 0.2px; line-height: 1.1;
+  }
+  .sp-hero-id-badge {
+    background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.4);
+    padding: 4px 12px; border-radius: 14px; font-size: 11px; font-weight: 700;
+    backdrop-filter: blur(4px);
+  }
+  .sp-hero-sub {
+    margin-top: 8px; font-size: 12px; opacity: 0.92;
+    display: flex; gap: 14px; flex-wrap: wrap; position: relative; z-index: 1;
+  }
+  .sp-hero-sub-item { display: flex; align-items: center; gap: 5px; }
+  .sp-hero-sub-item::before {
+    content: ''; width: 4px; height: 4px; background: white; border-radius: 50%;
+    opacity: 0.8;
+  }
+  .sp-hero-sub-item:first-child::before { display: none; }
+
+  .sp-quick-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: #eef0ee; border-bottom: 1px solid #eef0ee;
+  }
+  .sp-quick-tile {
+    background: white; padding: 14px 16px;
+  }
+  .sp-quick-tile .sp-qt-label {
+    font-size: 9.5px; font-weight: 700; color: #5a6b5e;
+    text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 4px;
+  }
+  .sp-quick-tile .sp-qt-value {
+    font-size: 16px; font-weight: 800; color: #1B5E20;
+    font-variant-numeric: tabular-nums;
+  }
+  .sp-quick-tile .sp-qt-sub {
+    font-size: 10px; color: #7a8a7d; margin-top: 2px;
+  }
+
+  .sp-sections {
+    padding: 18px 20px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;
+  }
+  .sp-section {
+    background: #fafbfa; border: 1px solid #eef2ee; border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .sp-section-title {
+    font-size: 11px; font-weight: 800; color: #1B5E20;
+    text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 6px;
+    padding-bottom: 8px; border-bottom: 1px solid #e5e8e5;
+  }
+  .sp-section-title .sp-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 6px;
+    background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%);
+    font-size: 12px;
+  }
+  .sp-kv { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; row-gap: 8px; }
+  .sp-kv-key {
+    font-size: 11px; color: #5a6b5e; font-weight: 600;
+  }
+  .sp-kv-val {
+    font-size: 12px; color: #1a2e1f; font-weight: 700; text-align: right;
+    font-variant-numeric: tabular-nums; word-break: break-word;
+  }
+  .sp-kv-val.muted { color: #a0a8a2; font-weight: 500; }
+  .sp-competitors { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .sp-comp-chip {
+    background: white; border: 1px solid #d4dad4; border-radius: 14px;
+    padding: 4px 11px; font-size: 11px; font-weight: 600; color: #1a2e1f;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .sp-comp-chip::before {
+    content: '⚔'; color: #C62828; font-size: 10px;
+  }
+  @media (max-width: 900px) {
+    .sp-shell { grid-template-columns: 1fr; }
+    .sp-list-panel { position: static; max-height: 400px; }
+    .sp-quick-grid { grid-template-columns: repeat(2, 1fr); }
+    .sp-sections { grid-template-columns: 1fr; }
+  }
+
   /* Unusual Transactions tab */
   .ut-row { display: flex; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
   .ut-row .ut-type-card  { flex: 1 1 480px; min-width: 360px; }
@@ -2801,6 +3046,7 @@ const html = `<!DOCTYPE html>
   <button class="tab-btn" onclick="switchTab(this, 'shopper')">Shopper Metrics</button>
   <button class="tab-btn" onclick="switchTab(this, 'unusual')">Unusual Transactions</button>
   <button class="tab-btn" onclick="switchTab(this, 'financial')">Financial Performance</button>
+  <button class="tab-btn" onclick="switchTab(this, 'storeprofile')">Store Profile</button>
 </div>
 
 <!-- DAILY TAB -->
@@ -3695,6 +3941,33 @@ const html = `<!DOCTYPE html>
     </div>
   </div>
 
+</div>
+
+<!-- ============ STORE PROFILE TAB ============ -->
+<div id="tab-storeprofile" class="content" style="display:none;">
+  <div id="spStatusBar" class="status-bar loading">
+    <span class="spinner"></span> Loading store profiles...
+  </div>
+  <div class="sp-shell">
+    <div class="sp-list-panel">
+      <div class="sp-list-header">
+        <div class="sp-title">🏪 Stores</div>
+        <div class="sp-meta" id="spListMeta">—</div>
+      </div>
+      <div class="sp-filters">
+        <input type="text" id="spSearch" class="sp-search" placeholder="🔍 Search store name or ID…" />
+        <select id="spAreaFilter" class="sp-area-select">
+          <option value="">All Areas</option>
+        </select>
+      </div>
+      <div class="sp-list" id="spList">
+        <div class="sp-empty-list">Loading…</div>
+      </div>
+    </div>
+    <div class="sp-detail" id="spDetail">
+      <div class="sp-detail-empty">Select a store from the list to view its profile.</div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -4928,9 +5201,210 @@ const html = `<!DOCTYPE html>
       finFirstLoad = true;
       loadFinancial();
     }
+    if (tabId === 'storeprofile' && !spFirstLoad) {
+      spFirstLoad = true;
+      loadStoreProfiles();
+    }
   };
   let utFirstLoad = false;
   let finFirstLoad = false;
+  let spFirstLoad = false;
+
+  // ============ STORE PROFILE ============
+  let spAll = [];
+  let spSelectedId = null;
+
+  async function loadStoreProfiles() {
+    const status = document.getElementById('spStatusBar');
+    status.className = 'status-bar loading';
+    status.innerHTML = '<span class="spinner"></span> Loading store profiles...';
+    try {
+      const res = await fetch('/api/store-profile');
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Unknown error');
+      spAll = data.stores || [];
+      const areaSel = document.getElementById('spAreaFilter');
+      areaSel.innerHTML = '<option value="">All Areas</option>' +
+        (data.allAreas || []).map(a => \`<option value="\${a}">\${a}</option>\`).join('');
+      areaSel.addEventListener('change', renderSpList);
+      document.getElementById('spSearch').addEventListener('input', renderSpList);
+      renderSpList();
+      status.className = 'status-bar';
+      status.innerHTML = \`✅ \${spAll.length} store\${spAll.length === 1 ? '' : 's'} loaded · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
+      // Auto-select the first store
+      if (spAll.length && !spSelectedId) selectSpStore(getSpFiltered()[0]?.storeId || spAll[0].storeId);
+    } catch (err) {
+      status.className = 'status-bar error';
+      status.innerHTML = '❌ Error: ' + err.message;
+    }
+  }
+
+  function getSpFiltered() {
+    const q = (document.getElementById('spSearch').value || '').trim().toLowerCase();
+    const areaV = document.getElementById('spAreaFilter').value;
+    return spAll.filter(s => {
+      if (areaV && s.area !== areaV) return false;
+      if (!q) return true;
+      return (s.storeName || '').toLowerCase().includes(q)
+          || (s.storeId   || '').toLowerCase().includes(q)
+          || (s.area      || '').toLowerCase().includes(q);
+    });
+  }
+
+  function renderSpList() {
+    const list = getSpFiltered();
+    document.getElementById('spListMeta').textContent =
+      list.length + ' of ' + spAll.length + ' shown';
+    const listEl = document.getElementById('spList');
+    if (!list.length) {
+      listEl.innerHTML = '<div class="sp-empty-list">No stores match your filter.</div>';
+      return;
+    }
+    listEl.innerHTML = list.map(s => \`
+      <div class="sp-list-item \${s.storeId === spSelectedId ? 'active' : ''}"
+           onclick="selectSpStore('\${s.storeId}')">
+        <div class="sp-li-name">
+          <span>\${s.storeName || '(unnamed)'}</span>
+          <span class="sp-li-id">#\${s.storeId}</span>
+        </div>
+        <div class="sp-li-area">\${s.area || '—'}\${s.format ? ' · ' + s.format : ''}</div>
+      </div>\`).join('');
+    // If the currently-selected store is not in the filtered list, auto-select first
+    if (spSelectedId && !list.some(s => s.storeId === spSelectedId)) {
+      selectSpStore(list[0].storeId);
+    } else if (!spSelectedId && list.length) {
+      selectSpStore(list[0].storeId);
+    }
+  }
+  window.selectSpStore = function(sid) {
+    spSelectedId = sid;
+    renderSpList();
+    renderSpDetail();
+  };
+
+  function spFmtMoney(n) {
+    if (!n || isNaN(n)) return '—';
+    return '₱' + Math.round(n).toLocaleString('en-PH');
+  }
+  function spFmtInt(n) {
+    if (!n && n !== 0) return '—';
+    if (isNaN(n)) return '—';
+    return Math.round(n).toLocaleString('en-PH');
+  }
+  function spFmtNum(n) {
+    if (!n && n !== 0) return '—';
+    if (isNaN(n)) return '—';
+    return n.toLocaleString('en-PH', { maximumFractionDigits: 2 });
+  }
+  function spText(v) {
+    return (v && v.toString().trim()) ? v : '—';
+  }
+  function spKv(k, v, muted) {
+    const val = (v === '—' || v === null || v === undefined) ? '—' : v;
+    const mutedCls = (muted || val === '—') ? ' muted' : '';
+    return \`<div class="sp-kv-key">\${k}</div><div class="sp-kv-val\${mutedCls}">\${val}</div>\`;
+  }
+
+  function renderSpDetail() {
+    const s = spAll.find(x => x.storeId === spSelectedId);
+    const el = document.getElementById('spDetail');
+    if (!s) {
+      el.innerHTML = '<div class="sp-detail-empty">Select a store from the list to view its profile.</div>';
+      return;
+    }
+    const competitors = [s.competitor1, s.competitor2, s.competitor3].filter(Boolean);
+    const compHtml = competitors.length
+      ? \`<div class="sp-competitors">\${competitors.map(c => \`<span class="sp-comp-chip">\${c}</span>\`).join('')}</div>\`
+      : '<div class="sp-kv-val muted" style="text-align:left;">No competitors listed</div>';
+
+    el.innerHTML = \`
+      <div class="sp-hero">
+        <div class="sp-hero-top">
+          <div class="sp-hero-name">\${s.storeName || '(unnamed)'}</div>
+          <div class="sp-hero-id-badge">#\${s.storeId}</div>
+        </div>
+        <div class="sp-hero-sub">
+          <span class="sp-hero-sub-item">📍 \${spText(s.area)}</span>
+          \${s.format ? '<span class="sp-hero-sub-item">🏬 ' + s.format + '</span>' : ''}
+          \${s.incomeClass ? '<span class="sp-hero-sub-item">🏆 Income Class ' + s.incomeClass + '</span>' : ''}
+          \${s.dateOpened ? '<span class="sp-hero-sub-item">🗓 Opened ' + s.dateOpened + '</span>' : ''}
+        </div>
+      </div>
+
+      <div class="sp-quick-grid">
+        <div class="sp-quick-tile">
+          <div class="sp-qt-label">Selling Area</div>
+          <div class="sp-qt-value">\${spFmtNum(s.sellingArea)}</div>
+          <div class="sp-qt-sub">SQM</div>
+        </div>
+        <div class="sp-quick-tile">
+          <div class="sp-qt-label">Warehouse</div>
+          <div class="sp-qt-value">\${spFmtNum(s.warehouseSize)}</div>
+          <div class="sp-qt-sub">SQM</div>
+        </div>
+        <div class="sp-quick-tile">
+          <div class="sp-qt-label">POS Counters</div>
+          <div class="sp-qt-value">\${spFmtInt(s.posCounters)}</div>
+          <div class="sp-qt-sub">registers</div>
+        </div>
+        <div class="sp-quick-tile">
+          <div class="sp-qt-label">Store Hours</div>
+          <div class="sp-qt-value" style="font-size:13px;">\${spText(s.storeHours)}</div>
+          <div class="sp-qt-sub">operating</div>
+        </div>
+      </div>
+
+      <div class="sp-sections">
+        <div class="sp-section">
+          <div class="sp-section-title"><span class="sp-icon">📐</span>Space &amp; Layout</div>
+          <div class="sp-kv">
+            \${spKv('Selling Area (SQM)', spFmtNum(s.sellingArea))}
+            \${spKv('Warehouse (SQM)',    spFmtNum(s.warehouseSize))}
+            \${spKv('POS Counters',       spFmtInt(s.posCounters))}
+            \${spKv('Format',             spText(s.format))}
+            \${spKv('Matrix',             spText(s.matrix))}
+          </div>
+        </div>
+
+        <div class="sp-section">
+          <div class="sp-section-title"><span class="sp-icon">💰</span>Lease &amp; Cost</div>
+          <div class="sp-kv">
+            \${spKv('Rent',              spFmtMoney(s.rent))}
+            \${spKv('Rent with VAT',     spFmtMoney(s.rentWithVat))}
+            \${spKv('CUSA',              spFmtMoney(s.cusa))}
+            \${spKv('Leased Contract',   spText(s.leasedContract))}
+            \${spKv('Leased Type',       spText(s.leasedType))}
+            \${spKv('Date Opened',       spText(s.dateOpened))}
+          </div>
+        </div>
+
+        <div class="sp-section">
+          <div class="sp-section-title"><span class="sp-icon">🌏</span>Location Context</div>
+          <div class="sp-kv">
+            \${spKv('Area',           spText(s.area))}
+            \${spKv('Population',     spFmtInt(s.population))}
+            \${spKv('No. of Barangay',spFmtInt(s.barangays))}
+            \${spKv('Income Class',   spText(s.incomeClass))}
+            \${spKv('No. of Tenants', spFmtInt(s.tenants))}
+          </div>
+        </div>
+
+        <div class="sp-section">
+          <div class="sp-section-title"><span class="sp-icon">🛠</span>Service Providers</div>
+          <div class="sp-kv">
+            \${spKv('SG Service Provider',  spText(s.sgProvider))}
+            \${spKv('I.S. Service Provider',spText(s.isProvider))}
+          </div>
+        </div>
+
+        <div class="sp-section" style="grid-column: 1 / -1;">
+          <div class="sp-section-title"><span class="sp-icon">⚔</span>Competitors</div>
+          \${compHtml}
+        </div>
+      </div>
+    \`;
+  }
+  // ============ END STORE PROFILE ============
 
   // ============ CATEGORY SALES ============
   const CAT_COLORS = {
