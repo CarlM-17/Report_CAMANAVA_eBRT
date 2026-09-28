@@ -1078,6 +1078,14 @@ app.get('/api/shopper-metrics', async (req, res) => {
     // even if they happen to be the latest present in the data.
     const currentMonthKey = monthOrder[new Date().getMonth()];
 
+    // Current month (in-progress) — B.Member so far and this month's Target
+    const currentMonthLabel = monthLabels[monthOrder.indexOf(currentMonthKey)] || null;
+    const currentMonthBmember = (byMonth[currentMonthKey] && byMonth[currentMonthKey].bmember) || 0;
+    const currentMonthTarget  = targetByMonth[currentMonthKey] || 0;
+    const currentMonthAchievementPct = currentMonthTarget > 0
+      ? (currentMonthBmember / currentMonthTarget) * 100
+      : null;
+
     // Achievement for the most recent COMPLETE month (excludes current in-progress month)
     let lastCompleteAchievementPct = null;
     let lastCompleteMonthLabel = null;
@@ -1128,7 +1136,11 @@ app.get('/api/shopper-metrics', async (req, res) => {
         lastCompleteAchievementPct,
         lastCompleteMonthLabel,
         lastCompleteBmember,
-        lastCompleteTarget },
+        lastCompleteTarget,
+        currentMonthLabel,
+        currentMonthBmember,
+        currentMonthTarget,
+        currentMonthAchievementPct },
       types: typesData,
       areas: areasData,
       stores: storesData,
@@ -6070,10 +6082,19 @@ const html = `<!DOCTYPE html>
       { label: 'Sales / Member',value: smFmtMoneyCompact(salesPerMember), diff: smFmtPct(spmDiff),          cls: (spmDiff || 0) >= 0 ? 'kpi-pos' : 'kpi-neg',     sub: 'avg per buying member' },
       { label: 'Sign-Up (Current Month)', value: smFmtCountCompact(s.signup), diff: smFmtPct(s.signupDiff.pct), cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg', sub: signupMonthLabel + ' · vs ' + smFmtCountCompact(s.signupLY) + ' LY' }
     ];
+    // Current month buying vs target (in-progress month)
+    const curMoPct = s.currentMonthAchievementPct;
+    const curMoCls = curMoPct === null || curMoPct === undefined ? '' : (curMoPct >= 100 ? 'kpi-pos' : 'kpi-neg');
+    const curMoVal = smFmtCountCompact(s.currentMonthBmember || 0) + ' / ' + smFmtCountCompact(s.currentMonthTarget || 0);
+    const curMoDiff = curMoPct === null || curMoPct === undefined ? null : curMoPct.toFixed(2) + '%';
+    const curMoSub = (s.currentMonthLabel ? s.currentMonthLabel + ' (in progress)' : 'current month') +
+      (s.currentMonthTarget > 0 ? '' : ' · no target');
+
     const bmCards = [
       { label: 'B.Member',      value: smFmtCountCompact(s.bmember),    diff: smFmtPct(s.bmemberDiff.pct),  cls: s.bmemberDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg',  sub: 'vs ' + smFmtCountCompact(s.bmemberLY) + ' LY' },
       { label: 'Net New Members', value: smFmtSignedInt(netNewMembers), diff: null,                         cls: netNewMembers >= 0 ? 'kpi-pos' : 'kpi-neg',      sub: 'B.Member − B.Member LY' },
       { label: 'Target Achievement', value: achVal,                     diff: null,                         cls: achCls,                                          sub: achSub },
+      { label: 'Current Month vs Target', value: curMoVal,              diff: curMoDiff,                    cls: curMoCls,                                        sub: curMoSub },
       { label: 'Sign-Up (Current Month)', value: smFmtCountCompact(s.signup), diff: smFmtPct(s.signupDiff.pct), cls: s.signupDiff.pct >= 0 ? 'kpi-pos' : 'kpi-neg', sub: signupMonthLabel + ' · vs ' + smFmtCountCompact(s.signupLY) + ' LY' }
     ];
     const cardHtml = c => \`
