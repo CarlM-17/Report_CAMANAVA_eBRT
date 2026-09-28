@@ -1078,13 +1078,19 @@ app.get('/api/shopper-metrics', async (req, res) => {
     // even if they happen to be the latest present in the data.
     const currentMonthKey = monthOrder[new Date().getMonth()];
 
-    // Current month (in-progress) — B.Member so far and this month's Target
-    const currentMonthLabel = monthLabels[monthOrder.indexOf(currentMonthKey)] || null;
-    const currentMonthBmember = (byMonth[currentMonthKey] && byMonth[currentMonthKey].bmember) || 0;
-    const currentMonthTarget  = targetByMonth[currentMonthKey] || 0;
+    // "Current Month vs Target" card uses the most recent month that actually has data
+    // (not necessarily today's calendar month, which may not yet have data).
+    let latestDataMonthKey = null;
+    for (let i = monthOrder.length - 1; i >= 0; i--) {
+      if (byMonth[monthOrder[i]]) { latestDataMonthKey = monthOrder[i]; break; }
+    }
+    const currentMonthLabel = latestDataMonthKey ? monthLabels[monthOrder.indexOf(latestDataMonthKey)] : null;
+    const currentMonthBmember = latestDataMonthKey ? byMonth[latestDataMonthKey].bmember : 0;
+    const currentMonthTarget  = latestDataMonthKey ? (targetByMonth[latestDataMonthKey] || 0) : 0;
     const currentMonthAchievementPct = currentMonthTarget > 0
       ? (currentMonthBmember / currentMonthTarget) * 100
       : null;
+    const currentMonthIsInProgress = latestDataMonthKey === currentMonthKey;
 
     // Achievement for the most recent COMPLETE month (excludes current in-progress month)
     let lastCompleteAchievementPct = null;
@@ -1140,7 +1146,8 @@ app.get('/api/shopper-metrics', async (req, res) => {
         currentMonthLabel,
         currentMonthBmember,
         currentMonthTarget,
-        currentMonthAchievementPct },
+        currentMonthAchievementPct,
+        currentMonthIsInProgress },
       types: typesData,
       areas: areasData,
       stores: storesData,
@@ -6087,7 +6094,9 @@ const html = `<!DOCTYPE html>
     const curMoCls = curMoPct === null || curMoPct === undefined ? '' : (curMoPct >= 100 ? 'kpi-pos' : 'kpi-neg');
     const curMoVal = smFmtCountCompact(s.currentMonthBmember || 0) + ' / ' + smFmtCountCompact(s.currentMonthTarget || 0);
     const curMoDiff = curMoPct === null || curMoPct === undefined ? null : curMoPct.toFixed(2) + '%';
-    const curMoSub = (s.currentMonthLabel ? s.currentMonthLabel + ' (in progress)' : 'current month') +
+    const curMoSub = (s.currentMonthLabel
+        ? s.currentMonthLabel + (s.currentMonthIsInProgress ? ' (in progress)' : '')
+        : 'latest month') +
       (s.currentMonthTarget > 0 ? '' : ' · no target');
 
     const bmCards = [
