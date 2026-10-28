@@ -3147,6 +3147,16 @@ const html = `<!DOCTYPE html>
 <!-- DAILY TAB -->
 <div id="tab-daily" class="content">
 
+  <div class="trend-card" id="trendCard" style="display:none; margin-top:0; margin-bottom:14px;">
+    <div class="trend-head">
+      <div>
+        <div class="trend-title">📈 Sales Trend · Past 3 / 6 / 9 Months</div>
+        <div class="trend-sub" id="trendSub">Complete months only (excludes current in-progress month).</div>
+      </div>
+    </div>
+    <div class="trend-grid" id="trendGrid"></div>
+  </div>
+
   <div class="filter-bar">
     <label>Month</label>
     <div class="multi-select" id="msMonth">
@@ -3264,16 +3274,6 @@ const html = `<!DOCTYPE html>
         </table>
       </div>
     </div>
-  </div>
-
-  <div class="trend-card" id="trendCard" style="display:none;">
-    <div class="trend-head">
-      <div>
-        <div class="trend-title">📈 Sales Trend · Past 3 / 6 / 9 Months</div>
-        <div class="trend-sub" id="trendSub">Complete months only (excludes current in-progress month).</div>
-      </div>
-    </div>
-    <div class="trend-grid" id="trendGrid"></div>
   </div>
 
   <div class="footer" id="footerText">CAMANAVA Region · Data Source: Google Sheets</div>
