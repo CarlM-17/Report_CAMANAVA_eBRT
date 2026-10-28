@@ -1661,6 +1661,41 @@ app.get('/api/data', async (req, res) => {
     if (storeId) breakdownTitle = storeNameMap[storeId] || storeId;
     else if (area) breakdownTitle = area;
 
+    // ----- P3 / P6 / P9 Trend (complete months only; excludes the current calendar month) -----
+    // Walk back from last COMPLETE calendar month, picking months that have data.
+    const curMonthIdx = nowDate.getMonth(); // 0-11 (incomplete month)
+    const completeMonths = [];
+    for (let i = curMonthIdx - 1; i >= 0 && completeMonths.length < 9; i--) {
+      const row = monthlyBreakdown[i];
+      if (row && row.dailySales !== null) {
+        // Reconstruct absolute monthly sales from daily avg × curDays used earlier
+        let curDays = daysInMonth(i, curYear);
+        if (i === 0) curDays -= 1;
+        completeMonths.push({
+          monthIdx: i,
+          month: MONTHS[i],
+          sales: (row.dailySales || 0) * curDays
+        });
+      }
+    }
+    // completeMonths is newest-first (e.g. Sep, Aug, Jul, ...)
+    const sliceAvg = (n) => {
+      const s = completeMonths.slice(0, n);
+      if (s.length === 0) return { avg: null, total: 0, count: 0, months: [] };
+      const total = s.reduce((a, r) => a + r.sales, 0);
+      return { avg: total / s.length, total, count: s.length, months: s.map(r => r.month) };
+    };
+    const p3 = sliceAvg(3);
+    const p6 = sliceAvg(6);
+    const p9 = sliceAvg(9);
+    const ratio = (a, b) => (a === null || !b) ? null : (a / b) * 100;
+    const trend = {
+      p3, p6, p9,
+      p3vsP6Pct: ratio(p3.avg, p6.avg),  // >100 = uptrend (recent 3 above 6-mo avg)
+      p3vsP9Pct: ratio(p3.avg, p9.avg),  // >100 = uptrend (recent 3 above 9-mo avg)
+      excludedMonth: MONTHS[curMonthIdx]
+    };
+
     // ----- FAST AGGREGATION FROM INDEXES -----
     // Get metrics for one store, OR for many stores (aggregate)
     function getStoreSet(storeIdFilter) {
@@ -1745,7 +1780,8 @@ app.get('/api/data', async (req, res) => {
       unusual: agg.unusual,
       perStore: perStore,
       monthlyBreakdown: monthlyBreakdown,
-      breakdownTitle: breakdownTitle
+      breakdownTitle: breakdownTitle,
+      trend: trend
     });
 
   } catch (err) {
@@ -2372,6 +2408,46 @@ const html = `<!DOCTYPE html>
   .breakdown-table .neg { color: #C62828; font-weight: 700; }
   .breakdown-table .empty-cell { color: #c5cdc5; }
   .breakdown-grid .table-wrapper { overflow-x: visible; }
+
+  /* ============ P3 / P6 / P9 Trend ============ */
+  .trend-card {
+    background: white; border: 1px solid #e5e8e5; border-radius: 12px;
+    padding: 16px 18px; margin-top: 18px;
+  }
+  .trend-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+  }
+  .trend-title { font-size: 14px; font-weight: 800; color: #1B5E20; letter-spacing: 0.2px; }
+  .trend-sub { font-size: 11px; color: #6a7a6d; }
+  .trend-grid {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;
+  }
+  .trend-tile {
+    background: #fafbfa; border: 1px solid #eef2ee; border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .trend-tile .tt-label {
+    font-size: 10px; font-weight: 800; color: #5a6b5e;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+  }
+  .trend-tile .tt-value {
+    font-size: 17px; font-weight: 800; color: #1B5E20;
+    font-variant-numeric: tabular-nums;
+  }
+  .trend-tile .tt-sub { font-size: 10px; color: #7a8a7d; margin-top: 3px; }
+  .trend-tile.trend-ratio {
+    background: linear-gradient(135deg, #F1F8E9 0%, #E8F5E9 100%);
+    border-color: #C8E6C9;
+  }
+  .trend-tile.trend-ratio.tr-up    { background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%); }
+  .trend-tile.trend-ratio.tr-down  { background: linear-gradient(135deg, #FFEBEE 0%, #FFCDD2 100%); border-color: #EF9A9A; }
+  .trend-tile.trend-ratio.tr-up    .tt-value { color: #1B5E20; }
+  .trend-tile.trend-ratio.tr-down  .tt-value { color: #C62828; }
+  .trend-tile .tt-arrow { margin-right: 4px; font-size: 15px; }
+  @media (max-width: 900px) {
+    .trend-grid { grid-template-columns: repeat(2, 1fr); }
+  }
 
   /* ============ MOBILE RESPONSIVE ============ */
 
@@ -3188,6 +3264,16 @@ const html = `<!DOCTYPE html>
         </table>
       </div>
     </div>
+  </div>
+
+  <div class="trend-card" id="trendCard" style="display:none;">
+    <div class="trend-head">
+      <div>
+        <div class="trend-title">📈 Sales Trend · Past 3 / 6 / 9 Months</div>
+        <div class="trend-sub" id="trendSub">Complete months only (excludes current in-progress month).</div>
+      </div>
+    </div>
+    <div class="trend-grid" id="trendGrid"></div>
   </div>
 
   <div class="footer" id="footerText">CAMANAVA Region · Data Source: Google Sheets</div>
@@ -4393,6 +4479,63 @@ const html = `<!DOCTYPE html>
     }).join('');
   }
 
+  function buildTrendCard(data) {
+    const card = document.getElementById('trendCard');
+    const grid = document.getElementById('trendGrid');
+    const sub  = document.getElementById('trendSub');
+    const t = data.trend;
+    if (!t || !t.p3 || t.p3.count === 0) {
+      if (card) card.style.display = 'none';
+      return;
+    }
+    card.style.display = '';
+    const excluded = t.excludedMonth ? \` Excludes <b>\${t.excludedMonth}</b> (in progress).\` : '';
+    const title = data.breakdownTitle ? ' · ' + data.breakdownTitle : '';
+    sub.innerHTML = 'Avg monthly sales using complete months only' + title + '.' + excluded;
+
+    const fmtMoney = n => {
+      if (n === null || n === undefined || isNaN(n)) return '—';
+      const abs = Math.abs(n), sign = n < 0 ? '-' : '';
+      if (abs >= 1e9) return sign + '₱' + (abs/1e9).toFixed(2) + 'B';
+      if (abs >= 1e6) return sign + '₱' + (abs/1e6).toFixed(2) + 'M';
+      if (abs >= 1e3) return sign + '₱' + (abs/1e3).toFixed(1) + 'K';
+      return sign + '₱' + Math.round(abs).toLocaleString('en-PH');
+    };
+    const periodTile = (label, p) => {
+      const monthsLbl = p && p.months && p.months.length
+        ? p.months.slice().reverse().join(' → ')
+        : '—';
+      return \`
+        <div class="trend-tile">
+          <div class="tt-label">\${label}</div>
+          <div class="tt-value">\${fmtMoney(p ? p.avg : null)}</div>
+          <div class="tt-sub">avg / mo · \${p ? p.count : 0} mos<br/><span style="color:#9aa89d;">\${monthsLbl}</span></div>
+        </div>\`;
+    };
+    const ratioTile = (label, pct, explain) => {
+      const have = pct !== null && pct !== undefined && !isNaN(pct);
+      const dir  = have ? (pct >= 100 ? 'up' : 'down') : null;
+      const arrow = dir === 'up' ? '▲' : dir === 'down' ? '▼' : '';
+      const cls = dir ? ('trend-ratio tr-' + dir) : 'trend-ratio';
+      const val = have ? pct.toFixed(2) + '%' : '—';
+      const diff = have ? ((pct - 100) >= 0 ? '+' : '') + (pct - 100).toFixed(2) + ' pts vs baseline' : '';
+      return \`
+        <div class="trend-tile \${cls}">
+          <div class="tt-label">\${label}</div>
+          <div class="tt-value"><span class="tt-arrow">\${arrow}</span>\${val}</div>
+          <div class="tt-sub">\${explain}<br/><span style="color:#9aa89d;">\${diff}</span></div>
+        </div>\`;
+    };
+
+    grid.innerHTML = [
+      periodTile('P3 · Last 3 Mos', t.p3),
+      periodTile('P6 · Last 6 Mos', t.p6),
+      periodTile('P9 · Last 9 Mos', t.p9),
+      ratioTile('P3 vs P6', t.p3vsP6Pct, '≥100% = recent 3 above 6-mo avg (uptrend)'),
+      ratioTile('P3 vs P9', t.p3vsP9Pct, '≥100% = recent 3 above 9-mo avg (uptrend)')
+    ].join('');
+  }
+
   window.sortSummary = function(colIdx) {
     if (summarySort.col === colIdx) {
       summarySort.asc = !summarySort.asc;
@@ -4429,6 +4572,7 @@ const html = `<!DOCTYPE html>
       buildTable(data);
       buildSummaryTable(data);
       buildBreakdownTables(data);
+      buildTrendCard(data);
 
       statusBar.className = 'status-bar';
       const f = data.filters || {};
