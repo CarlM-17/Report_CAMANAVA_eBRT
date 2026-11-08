@@ -7362,6 +7362,8 @@ const html = `<!DOCTYPE html>
   function renderFinPlTable() {
     const rows = finSortRows(finData.stores, finPlSort);
     const body = document.getElementById('finPlBody');
+    // Red style for negative monetary values (Op.Income / NIAT)
+    const negStyle = v => (typeof v === 'number' && v < 0) ? ' style="color:#C62828;font-weight:700;"' : '';
     body.innerHTML = rows.map(r => \`<tr>
       <td style="text-align:center;padding-left:14px;">\${r.rank || ''}</td>
       <td style="text-align:left;font-weight:600;color:#1B5E20;">\${r.storeName}</td>
@@ -7372,9 +7374,9 @@ const html = `<!DOCTYPE html>
       <td>\${finFmtPct(r.frontMarginPct)}</td>
       <td>\${finFmtPct(r.backMarginPct)}</td>
       <td>\${finFmtPct(r.opexPct)}</td>
-      <td>\${finFmtMoney(r.opIncome)}</td>
+      <td\${negStyle(r.opIncome)}>\${finFmtMoney(r.opIncome)}</td>
       <td class="\${finPctClass(r.opIncomePct)}">\${finFmtPct(r.opIncomePct)}</td>
-      <td>\${finFmtMoney(r.niat)}</td>
+      <td\${negStyle(r.niat)}>\${finFmtMoney(r.niat)}</td>
       <td class="\${finPctClass(r.niatPct)}">\${finFmtPct(r.niatPct)}</td>
       <td>\${finFmtMoney(r.ebitda)}</td>
       <td class="\${finPctClass(r.ebitdaPct)}">\${finFmtPct(r.ebitdaPct)}</td>
@@ -7382,6 +7384,7 @@ const html = `<!DOCTYPE html>
 
     const agg = finAggregate(finData.stores);
     const salesGrowth = finPctDelta(agg.posSales, agg.posSalesYA);
+    const footNegStyle = v => (typeof v === 'number' && v < 0) ? ' style="color:#C62828;"' : '';
     document.getElementById('finPlFoot').innerHTML = \`<tr style="background:#FAF8F0;font-weight:700;">
       <td></td>
       <td style="text-align:left;color:#1B5E20;">SUBTOTAL (\${finData.stores.length})</td>
@@ -7392,9 +7395,9 @@ const html = `<!DOCTYPE html>
       <td>\${finFmtPct(agg._frontPct)}</td>
       <td>\${finFmtPct(agg._backPct)}</td>
       <td>\${finFmtPct(agg._opexPct)}</td>
-      <td>\${finFmtMoney(agg.opIncome)}</td>
+      <td\${footNegStyle(agg.opIncome)}>\${finFmtMoney(agg.opIncome)}</td>
       <td>\${finFmtPct(agg._opIncPct)}</td>
-      <td>\${finFmtMoney(agg.niat)}</td>
+      <td\${footNegStyle(agg.niat)}>\${finFmtMoney(agg.niat)}</td>
       <td>\${finFmtPct(agg._niatPct)}</td>
       <td>\${finFmtMoney(agg.ebitda)}</td>
       <td>\${finFmtPct(agg._ebitdaPct)}</td>
