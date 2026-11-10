@@ -4604,8 +4604,12 @@ const html = `<!DOCTYPE html>
                      : mList.length <= 3 ? 'Months: ' + mList.join(', ')
                      : 'Months: ' + mList.length + ' selected';
       const storeIdsSel = getMsValues('msStore');
+      const storeNameOf = sid => {
+        const m = (allStores || []).find(s => s.storeId === sid);
+        return m ? m.name : sid;
+      };
       const storeTxt = storeIdsSel.length === 0 ? null
-                     : storeIdsSel.length === 1 ? 'Store: ' + storeIdsSel[0]
+                     : storeIdsSel.length === 1 ? 'Store: ' + storeNameOf(storeIdsSel[0])
                      : 'Stores: ' + storeIdsSel.length + ' selected';
       const filterTxt = [
         monthTxt,
@@ -4644,7 +4648,12 @@ const html = `<!DOCTYPE html>
     if (!btn) return;
     if (vals.length === 0) btn.textContent = allLabel + ' ▾';
     else if (id === 'msStore') {
-      btn.textContent = vals.length === 1 ? vals[0] + ' ▾' : vals.length + ' stores ▾';
+      if (vals.length === 1) {
+        const match = (allStores || []).find(s => s.storeId === vals[0]);
+        btn.textContent = (match ? match.name : vals[0]) + ' ▾';
+      } else {
+        btn.textContent = vals.length + ' stores ▾';
+      }
     }
     else if (vals.length <= 2) btn.textContent = vals.map(v => v.substring(0,3)).join(', ') + ' ▾';
     else btn.textContent = vals.length + ' selected ▾';
