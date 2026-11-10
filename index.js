@@ -2427,6 +2427,57 @@ const html = `<!DOCTYPE html>
   .breakdown-table .pos { color: #2E7D32; font-weight: 700; }
   .breakdown-table .neg { color: #C62828; font-weight: 700; }
   .breakdown-table .empty-cell { color: #c5cdc5; }
+
+  /* ============ Category drill-down tooltip ============ */
+  .cat-hover { cursor: pointer; }
+  .cat-hover:hover {
+    background: #FFF9C4 !important;
+    outline: 1px solid #FFC107; outline-offset: -1px;
+  }
+  #catTooltip {
+    position: fixed; z-index: 1000; display: none;
+    background: white; border: 1px solid #1B5E20; border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+    padding: 0; font-size: 11.5px; pointer-events: none;
+    min-width: 320px; max-width: 420px;
+    overflow: hidden;
+  }
+  #catTooltip .ctt-head {
+    background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 100%);
+    color: white; padding: 10px 14px;
+  }
+  #catTooltip .ctt-title {
+    font-size: 12px; font-weight: 800; letter-spacing: 0.3px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  #catTooltip .ctt-badge {
+    background: rgba(255,255,255,0.22); border: 1px solid rgba(255,255,255,0.35);
+    border-radius: 10px; padding: 2px 9px; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  #catTooltip .ctt-sub {
+    font-size: 10px; opacity: 0.9; margin-top: 3px;
+  }
+  #catTooltip .ctt-section-label {
+    font-size: 9px; font-weight: 800; color: #C62828;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    padding: 8px 14px 4px;
+  }
+  #catTooltip table {
+    width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums;
+  }
+  #catTooltip th, #catTooltip td {
+    padding: 6px 10px; text-align: right; font-size: 11px;
+    border-bottom: 1px solid #f0f2ef;
+  }
+  #catTooltip th { color: #5a6b5e; font-weight: 700; font-size: 9.5px; background: #fafbf9; }
+  #catTooltip td.store { text-align: left; color: #1a2e1f; font-weight: 600; }
+  #catTooltip td.sid { text-align: left; color: #7a8a7d; font-size: 10px; width: 36px; }
+  #catTooltip td.neg { color: #C62828; font-weight: 700; }
+  #catTooltip td.pos { color: #2E7D32; font-weight: 700; }
+  #catTooltip .ctt-empty {
+    padding: 14px; text-align: center; color: #8a9a8d; font-size: 11px; font-style: italic;
+  }
   .breakdown-grid .table-wrapper { overflow-x: visible; }
 
   /* ============ P3 / P6 / P9 Trend ============ */
@@ -3302,6 +3353,9 @@ const html = `<!DOCTYPE html>
   <div class="footer" id="footerText">CAMANAVA Region · Data Source: Google Sheets</div>
 </div>
 
+<!-- Category drill-down tooltip (One Page BRT) -->
+<div id="catTooltip"></div>
+
 <!-- PER STORE SALES PERFORMANCE TAB -->
 <div id="tab-monthly" class="content" style="display:none;">
 
@@ -4156,55 +4210,59 @@ const html = `<!DOCTYPE html>
   function dataRow(label, salesCur, salesYA, salesDiffPct, salesDiffVal,
                    trxCur, trxYA, trxDiffPct, trxDiffVal,
                    bskCur, bskYA, bskDiffPct, bskDiffVal,
-                   sobCur, sobYA, rowClass) {
+                   sobCur, sobYA, rowClass, catKey) {
     const sDiffPctClass = salesDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
     const sDiffValClass = salesDiffVal >= 0 ? 'diff-pos' : 'diff-neg';
     const tDiffPctClass = trxDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
     const tDiffValClass = trxDiffVal >= 0 ? 'diff-pos' : 'diff-neg';
     const bDiffPctClass = bskDiffPct >= 0 ? 'diff-pos' : 'diff-neg';
     const bDiffValClass = bskDiffVal >= 0 ? 'diff-pos' : 'diff-neg';
+    const catAttr = catKey ? \` data-cat="\${catKey}" data-label="\${label}"\` : '';
+    const hoverable = catKey ? 'cat-hover' : '';
 
-    return \`<tr class="\${rowClass || ''}">
+    return \`<tr class="\${rowClass || ''}"\${catAttr}>
       <td class="metrics-col">\${label}</td>
       <td class="data-col">\${fmt(salesCur)}</td>
       <td class="data-col">\${fmt(salesYA)}</td>
-      <td class="data-col \${sDiffPctClass}">\${fmtPct(salesDiffPct)}</td>
-      <td class="data-col \${sDiffValClass}">\${fmtDiffVal(salesDiffVal)}</td>
+      <td class="data-col \${sDiffPctClass} \${hoverable}" data-metric="sales">\${fmtPct(salesDiffPct)}</td>
+      <td class="data-col \${sDiffValClass} \${hoverable}" data-metric="sales">\${fmtDiffVal(salesDiffVal)}</td>
       <td class="data-col">\${fmt(trxCur, true)}</td>
       <td class="data-col">\${fmt(trxYA, true)}</td>
-      <td class="data-col \${tDiffPctClass}">\${fmtPct(trxDiffPct)}</td>
-      <td class="data-col \${tDiffValClass}">\${fmtDiffVal(trxDiffVal, true)}</td>
+      <td class="data-col \${tDiffPctClass} \${hoverable}" data-metric="trx">\${fmtPct(trxDiffPct)}</td>
+      <td class="data-col \${tDiffValClass} \${hoverable}" data-metric="trx">\${fmtDiffVal(trxDiffVal, true)}</td>
       <td class="data-col">\${fmt(bskCur)}</td>
       <td class="data-col">\${fmt(bskYA)}</td>
-      <td class="data-col \${bDiffPctClass}">\${fmtPct(bskDiffPct)}</td>
-      <td class="data-col \${bDiffValClass}">\${fmtDiffVal(bskDiffVal)}</td>
+      <td class="data-col \${bDiffPctClass} \${hoverable}" data-metric="basket">\${fmtPct(bskDiffPct)}</td>
+      <td class="data-col \${bDiffValClass} \${hoverable}" data-metric="basket">\${fmtDiffVal(bskDiffVal)}</td>
       <td class="data-col">\${sobCur === null || sobCur === undefined ? '<span class="empty-cell">—</span>' : fmtSob(sobCur)}</td>
       <td class="data-col">\${sobYA  === null || sobYA  === undefined ? '<span class="empty-cell">—</span>' : fmtSob(sobYA)}</td>
     </tr>\`;
   }
 
   // Helper: build a row from a metrics object { sales:{...}, trx:{...}, basket:{...} }
-  function metricsRow(label, m, sobCur, sobYA, rowClass) {
+  function metricsRow(label, m, sobCur, sobYA, rowClass, catKey) {
     return dataRow(label,
       m.sales.current, m.sales.yearAgo, m.sales.diffPct, m.sales.diffVal,
       m.trx.current, m.trx.yearAgo, m.trx.diffPct, m.trx.diffVal,
       m.basket.current, m.basket.yearAgo, m.basket.diffPct, m.basket.diffVal,
-      sobCur, sobYA, rowClass
+      sobCur, sobYA, rowClass, catKey
     );
   }
 
   // Sales-only row: sales values shown, TRX and Basket cells show dashes
-  function salesOnlyRow(label, salesMetrics, sobCur, sobYA, rowClass) {
+  function salesOnlyRow(label, salesMetrics, sobCur, sobYA, rowClass, catKey) {
     const s = salesMetrics.sales || salesMetrics;
     const sDiffPctClass = s.diffPct >= 0 ? 'diff-pos' : 'diff-neg';
     const sDiffValClass = s.diffVal >= 0 ? 'diff-pos' : 'diff-neg';
     const blank = '<td class="data-col empty-cell">—</td>';
-    return \`<tr class="\${rowClass || ''}">
+    const catAttr = catKey ? \` data-cat="\${catKey}" data-label="\${label}"\` : '';
+    const hoverable = catKey ? 'cat-hover' : '';
+    return \`<tr class="\${rowClass || ''}"\${catAttr}>
       <td class="metrics-col">\${label}</td>
       <td class="data-col">\${fmt(s.current)}</td>
       <td class="data-col">\${fmt(s.yearAgo)}</td>
-      <td class="data-col \${sDiffPctClass}">\${fmtPct(s.diffPct)}</td>
-      <td class="data-col \${sDiffValClass}">\${fmtDiffVal(s.diffVal)}</td>
+      <td class="data-col \${sDiffPctClass} \${hoverable}" data-metric="sales">\${fmtPct(s.diffPct)}</td>
+      <td class="data-col \${sDiffValClass} \${hoverable}" data-metric="sales">\${fmtDiffVal(s.diffVal)}</td>
       \${blank}\${blank}\${blank}\${blank}
       \${blank}\${blank}\${blank}\${blank}
       <td class="data-col">\${sobCur === null || sobCur === undefined ? '<span class="empty-cell">—</span>' : fmtSob(sobCur)}</td>
@@ -4237,43 +4295,43 @@ const html = `<!DOCTYPE html>
     const tb = document.getElementById('tableBody');
     tb.innerHTML = \`
       <tr class="group-label"><td colspan="15">Overview</td></tr>
-      \${metricsRow('Total Sales', d.totalSales, null, null, 'highlight-row')}
+      \${metricsRow('Total Sales', d.totalSales, null, null, 'highlight-row', 'totalSales')}
       \${metricsRow('Total TNAP', totalTnap,
         sob(totalTnap.sales.current, totalSalesCur),
-        sob(totalTnap.sales.yearAgo, totalSalesYA))}
+        sob(totalTnap.sales.yearAgo, totalSalesYA), '', 'totalTnap')}
       \${metricsRow('TNAP', d.tnap,
         sob(d.tnap.sales.current, totalSalesCur),
-        sob(d.tnap.sales.yearAgo, totalSalesYA))}
+        sob(d.tnap.sales.yearAgo, totalSalesYA), '', 'tnap')}
       \${metricsRow('KAIN', d.kain,
         sob(d.kain.sales.current, totalSalesCur),
-        sob(d.kain.sales.yearAgo, totalSalesYA))}
+        sob(d.kain.sales.yearAgo, totalSalesYA), '', 'kain')}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Loyalty Segments</td></tr>
       \${metricsRow('APAR', d.apar,
         sob(d.apar.sales.current, totalTnapSalesCur),
-        sob(d.apar.sales.yearAgo, totalTnapSalesYA))}
+        sob(d.apar.sales.yearAgo, totalTnapSalesYA), '', 'apar')}
       \${metricsRow('TOP 200', d.top200,
         sob(d.top200.sales.current, tnapSalesCur),
-        sob(d.top200.sales.yearAgo, tnapSalesYA))}
+        sob(d.top200.sales.yearAgo, tnapSalesYA), '', 'top200')}
       \${metricsRow('Balance TNAP', balanceTnap,
         sob(balanceTnap.sales.current, totalTnapSalesCur),
-        sob(balanceTnap.sales.yearAgo, totalTnapSalesYA), 'highlight-green')}
+        sob(balanceTnap.sales.yearAgo, totalTnapSalesYA), 'highlight-green', 'balanceTnap')}
       \${metricsRow('Gold', d.gold,
         sob(d.gold.sales.current, totalTnapSalesCur),
-        sob(d.gold.sales.yearAgo, totalTnapSalesYA))}
+        sob(d.gold.sales.yearAgo, totalTnapSalesYA), '', 'gold')}
       \${metricsRow('Elite', d.elite,
         sob(d.elite.sales.current, totalTnapSalesCur),
-        sob(d.elite.sales.yearAgo, totalTnapSalesYA))}
+        sob(d.elite.sales.yearAgo, totalTnapSalesYA), '', 'elite')}
       \${metricsRow('Green', d.green,
         sob(d.green.sales.current, totalTnapSalesCur),
-        sob(d.green.sales.yearAgo, totalTnapSalesYA))}
-      \${metricsRow('Total GEG', totalGEG, null, null, 'highlight-green')}
+        sob(d.green.sales.yearAgo, totalTnapSalesYA), '', 'green')}
+      \${metricsRow('Total GEG', totalGEG, null, null, 'highlight-green', 'totalGEG')}
       \${metricsRow('PERKS', d.perks,
         sob(d.perks.sales.current, totalSalesCur),
-        sob(d.perks.sales.yearAgo, totalSalesYA))}
+        sob(d.perks.sales.yearAgo, totalSalesYA), '', 'perks')}
       \${metricsRow('PAG-IBIG', d.pagibig,
         sob(d.pagibig.sales.current, totalSalesCur),
-        sob(d.pagibig.sales.yearAgo, totalSalesYA))}
+        sob(d.pagibig.sales.yearAgo, totalSalesYA), '', 'pagibig')}
       <tr class="group-divider"><td colspan="15"></td></tr>
       <tr class="group-label"><td colspan="15">Uncarded</td></tr>
       \${(() => {
@@ -4296,16 +4354,16 @@ const html = `<!DOCTYPE html>
         return \`
           \${metricsRow('UnCarded with Unusual', uncardedWithUnusual,
             sob(uncardedWithUnusual.sales.current, totalSalesCur),
-            sob(uncardedWithUnusual.sales.yearAgo, totalSalesYA))}
+            sob(uncardedWithUnusual.sales.yearAgo, totalSalesYA), '', 'uncardedWithUnusual')}
           \${salesOnlyRow('UnUsual Transaction', d.unusual,
             sob(d.unusual.sales.current, totalSalesCur),
-            sob(d.unusual.sales.yearAgo, totalSalesYA))}
+            sob(d.unusual.sales.yearAgo, totalSalesYA), '', 'unusual')}
           \${metricsRow('Total Uncarded', totalUncarded,
             sob(totalUncarded.sales.current, totalSalesCur),
-            sob(totalUncarded.sales.yearAgo, totalSalesYA))}
+            sob(totalUncarded.sales.yearAgo, totalSalesYA), '', 'totalUncarded')}
           \${salesOnlyRow('Net of Unusual', netOfUnusual,
             sob(netOfUnusual.sales.current, totalSalesCur),
-            sob(netOfUnusual.sales.yearAgo, totalSalesYA), 'highlight-green')}
+            sob(netOfUnusual.sales.yearAgo, totalSalesYA), 'highlight-green', 'netOfUnusual')}
         \`;
       })()}
     \`;
@@ -4559,6 +4617,200 @@ const html = `<!DOCTYPE html>
     ].join('');
   }
 
+  // ============ Category drill-down tooltip engine ============
+  // On hover over a Diff cell in a tagged category row, show top declining stores
+  (function() {
+    const tt = document.getElementById('catTooltip');
+    if (!tt) return;
+
+    // Derive a store's metrics object for a computed category
+    function catMetricFor(sMetrics, cat) {
+      if (!sMetrics) return null;
+      switch (cat) {
+        case 'totalSales': return sMetrics.totalSales;
+        case 'tnap':       return sMetrics.tnap;
+        case 'kain':       return sMetrics.kain;
+        case 'perks':      return sMetrics.perks;
+        case 'pagibig':    return sMetrics.pagibig;
+        case 'apar':       return sMetrics.apar;
+        case 'gold':       return sMetrics.gold;
+        case 'elite':      return sMetrics.elite;
+        case 'green':      return sMetrics.green;
+        case 'top200':     return sMetrics.top200;
+        case 'unusual':    return sMetrics.unusual;
+        case 'totalTnap':  return combineMetrics(sMetrics.tnap, sMetrics.kain);
+        case 'totalGEG':   return combineMetrics(combineMetrics(sMetrics.gold, sMetrics.elite), sMetrics.green);
+        case 'balanceTnap': {
+          const tt = combineMetrics(sMetrics.tnap, sMetrics.kain);
+          return subtractMetrics(subtractMetrics(tt, sMetrics.apar), sMetrics.top200);
+        }
+        case 'uncardedWithUnusual': {
+          const tt = combineMetrics(sMetrics.tnap, sMetrics.kain);
+          return subtractMetrics(subtractMetrics(subtractMetrics(sMetrics.totalSales, tt), sMetrics.perks), sMetrics.pagibig);
+        }
+        case 'totalUncarded': {
+          const tt = combineMetrics(sMetrics.tnap, sMetrics.kain);
+          const uwu = subtractMetrics(subtractMetrics(subtractMetrics(sMetrics.totalSales, tt), sMetrics.perks), sMetrics.pagibig);
+          return subtractMetrics(uwu, sMetrics.unusual);
+        }
+        case 'netOfUnusual': return subtractSalesOnly(sMetrics.totalSales, sMetrics.unusual);
+        default: return null;
+      }
+    }
+
+    function combineMetrics(a, b) {
+      if (!a) return b; if (!b) return a;
+      const aS = a.sales || {current:0,yearAgo:0}, bS = b.sales || {current:0,yearAgo:0};
+      const aT = a.trx   || {current:0,yearAgo:0}, bT = b.trx   || {current:0,yearAgo:0};
+      const sC = aS.current + bS.current, sY = aS.yearAgo + bS.yearAgo;
+      const tC = aT.current + bT.current, tY = aT.yearAgo + bT.yearAgo;
+      const bskC = tC !== 0 ? sC / tC : 0, bskY = tY !== 0 ? sY / tY : 0;
+      return {
+        sales:  { current: sC,   yearAgo: sY,   diffVal: sC - sY },
+        trx:    { current: tC,   yearAgo: tY,   diffVal: tC - tY },
+        basket: { current: bskC, yearAgo: bskY, diffVal: bskC - bskY }
+      };
+    }
+    function subtractMetrics(a, b) {
+      if (!a) return null;
+      const aS = a.sales || {current:0,yearAgo:0};
+      const aT = a.trx   || {current:0,yearAgo:0};
+      const bS = (b && b.sales) || {current:0,yearAgo:0};
+      const bT = (b && b.trx)   || {current:0,yearAgo:0};
+      const sC = aS.current - bS.current, sY = aS.yearAgo - bS.yearAgo;
+      const tC = aT.current - bT.current, tY = aT.yearAgo - bT.yearAgo;
+      const bskC = tC !== 0 ? sC / tC : 0, bskY = tY !== 0 ? sY / tY : 0;
+      return {
+        sales:  { current: sC,   yearAgo: sY,   diffVal: sC - sY },
+        trx:    { current: tC,   yearAgo: tY,   diffVal: tC - tY },
+        basket: { current: bskC, yearAgo: bskY, diffVal: bskC - bskY }
+      };
+    }
+    function subtractSalesOnly(a, b) {
+      const aS = (a && a.sales) || {current:0,yearAgo:0};
+      const bS = (b && b.sales) || {current:0,yearAgo:0};
+      const sC = aS.current - bS.current, sY = aS.yearAgo - bS.yearAgo;
+      return { sales: { current: sC, yearAgo: sY, diffVal: sC - sY }, trx: null, basket: null };
+    }
+
+    const metricLabel = m => m === 'sales' ? 'Sales' : m === 'trx' ? 'TRX Count' : 'Basket Size';
+    const fmtAmt = (v, isCount) => {
+      if (v === null || v === undefined || isNaN(v)) return '—';
+      const abs = Math.abs(v), sign = v < 0 ? '-' : '+';
+      if (isCount) return sign + Math.round(abs).toLocaleString('en-PH');
+      if (abs >= 1e9) return sign + '₱' + (abs/1e9).toFixed(2) + 'B';
+      if (abs >= 1e6) return sign + '₱' + (abs/1e6).toFixed(2) + 'M';
+      if (abs >= 1e3) return sign + '₱' + (abs/1e3).toFixed(1) + 'K';
+      return sign + '₱' + Math.round(abs).toLocaleString('en-PH');
+    };
+
+    function buildTopDecliners(cat, metric, label) {
+      const data = window._brtData;
+      if (!data || !data.perStore || !data.perStore.length) {
+        tt.innerHTML = '<div class="ctt-empty">No per-store data available.</div>';
+        return;
+      }
+      const isCount = metric === 'trx';
+      const rows = [];
+      data.perStore.forEach(s => {
+        const cm = catMetricFor(s.metrics, cat);
+        if (!cm) return;
+        const mm = cm[metric];
+        if (!mm) return;
+        const dv = mm.diffVal;
+        if (dv === null || dv === undefined || isNaN(dv)) return;
+        rows.push({
+          storeId: s.storeId, storeName: s.storeName,
+          current: mm.current, yearAgo: mm.yearAgo, diffVal: dv
+        });
+      });
+      // Top decliners — most-negative first
+      const decliners = rows.filter(r => r.diffVal < 0).sort((a, b) => a.diffVal - b.diffVal).slice(0, 8);
+      const growers   = rows.filter(r => r.diffVal > 0).sort((a, b) => b.diffVal - a.diffVal).slice(0, 3);
+      const title = label + ' · ' + metricLabel(metric);
+
+      let html = \`
+        <div class="ctt-head">
+          <div class="ctt-title">
+            <span>\${title}</span>
+            <span class="ctt-badge">Top Decliners</span>
+          </div>
+          <div class="ctt-sub">Per-store Year-over-Year differences · click outside to dismiss</div>
+        </div>\`;
+
+      if (decliners.length === 0) {
+        html += '<div class="ctt-empty">No stores declined for this category.</div>';
+      } else {
+        html += '<div class="ctt-section-label">▼ Top Declined Stores</div>';
+        html += '<table><thead><tr><th style="text-align:left;">Store</th><th>Current</th><th>Year Ago</th><th>Diff Val</th></tr></thead><tbody>';
+        decliners.forEach(d => {
+          html += \`<tr>
+            <td class="sid">#\${d.storeId}</td>
+            <td class="store">\${d.storeName}</td>
+            <td>\${isCount ? Math.round(d.current).toLocaleString('en-PH') : Math.round(d.current).toLocaleString('en-PH')}</td>
+            <td>\${isCount ? Math.round(d.yearAgo).toLocaleString('en-PH') : Math.round(d.yearAgo).toLocaleString('en-PH')}</td>
+            <td class="neg">\${fmtAmt(d.diffVal, isCount)}</td>
+          </tr>\`;
+        });
+        html += '</tbody></table>';
+      }
+      if (growers.length > 0) {
+        html += '<div class="ctt-section-label" style="color:#2E7D32;">▲ Top Growers</div>';
+        html += '<table><tbody>';
+        growers.forEach(g => {
+          html += \`<tr>
+            <td class="sid">#\${g.storeId}</td>
+            <td class="store">\${g.storeName}</td>
+            <td class="pos">\${fmtAmt(g.diffVal, isCount)}</td>
+          </tr>\`;
+        });
+        html += '</tbody></table>';
+      }
+      tt.innerHTML = html;
+    }
+
+    function placeTooltip(x, y) {
+      // Position near cursor, keep in viewport
+      const pad = 14;
+      const rect = tt.getBoundingClientRect();
+      let left = x + 18, top = y + 14;
+      if (left + rect.width + pad > window.innerWidth)  left = x - rect.width - 18;
+      if (top  + rect.height + pad > window.innerHeight) top  = window.innerHeight - rect.height - pad;
+      if (top < pad) top = pad;
+      if (left < pad) left = pad;
+      tt.style.left = left + 'px';
+      tt.style.top  = top + 'px';
+    }
+
+    let activeCell = null;
+    document.addEventListener('mouseover', (e) => {
+      const cell = e.target.closest('.cat-hover');
+      if (!cell) return;
+      const tr = cell.closest('tr');
+      if (!tr || !tr.dataset.cat) return;
+      activeCell = cell;
+      const cat = tr.dataset.cat;
+      const metric = cell.dataset.metric;
+      const label = tr.dataset.label || cat;
+      buildTopDecliners(cat, metric, label);
+      tt.style.display = 'block';
+      placeTooltip(e.clientX, e.clientY);
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!activeCell) return;
+      if (tt.style.display === 'block') placeTooltip(e.clientX, e.clientY);
+    });
+    document.addEventListener('mouseout', (e) => {
+      const cell = e.target.closest('.cat-hover');
+      if (!cell) return;
+      // Hide only when leaving the cell AND not entering another cat-hover cell
+      const to = e.relatedTarget && e.relatedTarget.closest ? e.relatedTarget.closest('.cat-hover') : null;
+      if (to) return;
+      tt.style.display = 'none';
+      activeCell = null;
+    });
+  })();
+
   window.sortSummary = function(colIdx) {
     if (summarySort.col === colIdx) {
       summarySort.asc = !summarySort.asc;
@@ -4592,6 +4844,7 @@ const html = `<!DOCTYPE html>
 
       if (!data.ok) throw new Error(data.error || 'Unknown error');
 
+      window._brtData = data;   // cache for category drill-down tooltip
       buildTable(data);
       buildSummaryTable(data);
       buildBreakdownTables(data);
