@@ -2439,9 +2439,13 @@ const html = `<!DOCTYPE html>
     background: white; border: 1px solid #1B5E20; border-radius: 10px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.18);
     padding: 0; font-size: 11.5px; pointer-events: none;
-    min-width: 320px; max-width: 420px;
+    min-width: 520px; max-width: 620px;
     overflow: hidden;
   }
+  #catTooltip table { table-layout: fixed; }
+  #catTooltip col.c-sid     { width: 44px; }
+  #catTooltip col.c-store   { width: 32%; }
+  #catTooltip col.c-num     { width: auto; }
   #catTooltip .ctt-head {
     background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 100%);
     color: white; padding: 10px 14px;
@@ -4694,14 +4698,25 @@ const html = `<!DOCTYPE html>
     }
 
     const metricLabel = m => m === 'sales' ? 'Sales' : m === 'trx' ? 'TRX Count' : 'Basket Size';
-    const fmtAmt = (v, isCount) => {
+    const fmtAmt = (v, metric) => {
       if (v === null || v === undefined || isNaN(v)) return '—';
       const abs = Math.abs(v), sign = v < 0 ? '-' : '+';
-      if (isCount) return sign + Math.round(abs).toLocaleString('en-PH');
+      if (metric === 'trx') return sign + Math.round(abs).toLocaleString('en-PH');
+      if (metric === 'basket') return sign + abs.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       if (abs >= 1e9) return sign + '₱' + (abs/1e9).toFixed(2) + 'B';
       if (abs >= 1e6) return sign + '₱' + (abs/1e6).toFixed(2) + 'M';
       if (abs >= 1e3) return sign + '₱' + (abs/1e3).toFixed(1) + 'K';
       return sign + '₱' + Math.round(abs).toLocaleString('en-PH');
+    };
+    const fmtVal = (v, metric) => {
+      if (v === null || v === undefined || isNaN(v)) return '—';
+      const abs = Math.abs(v);
+      if (metric === 'trx') return Math.round(abs).toLocaleString('en-PH');
+      if (metric === 'basket') return abs.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      if (abs >= 1e9) return '₱' + (abs/1e9).toFixed(2) + 'B';
+      if (abs >= 1e6) return '₱' + (abs/1e6).toFixed(2) + 'M';
+      if (abs >= 1e3) return '₱' + (abs/1e3).toFixed(1) + 'K';
+      return '₱' + Math.round(abs).toLocaleString('en-PH');
     };
 
     function buildTopDecliners(cat, metric, label) {
@@ -4710,7 +4725,6 @@ const html = `<!DOCTYPE html>
         tt.innerHTML = '<div class="ctt-empty">No per-store data available.</div>';
         return;
       }
-      const isCount = metric === 'trx';
       const rows = [];
       data.perStore.forEach(s => {
         const cm = catMetricFor(s.metrics, cat);
@@ -4738,30 +4752,38 @@ const html = `<!DOCTYPE html>
           <div class="ctt-sub">Per-store Year-over-Year differences · click outside to dismiss</div>
         </div>\`;
 
+      const cols = \`<colgroup>
+        <col class="c-sid"/><col class="c-store"/>
+        <col class="c-num"/><col class="c-num"/><col class="c-num"/>
+      </colgroup>\`;
+
       if (decliners.length === 0) {
         html += '<div class="ctt-empty">No stores declined for this category.</div>';
       } else {
         html += '<div class="ctt-section-label">▼ Top Declined Stores</div>';
-        html += '<table><thead><tr><th style="text-align:left;">Store</th><th>Current</th><th>Year Ago</th><th>Diff Val</th></tr></thead><tbody>';
+        html += '<table>' + cols +
+          '<thead><tr><th colspan="2" style="text-align:left;">Store</th><th>Current</th><th>Year Ago</th><th>Diff Val</th></tr></thead><tbody>';
         decliners.forEach(d => {
           html += \`<tr>
             <td class="sid">#\${d.storeId}</td>
             <td class="store">\${d.storeName}</td>
-            <td>\${isCount ? Math.round(d.current).toLocaleString('en-PH') : Math.round(d.current).toLocaleString('en-PH')}</td>
-            <td>\${isCount ? Math.round(d.yearAgo).toLocaleString('en-PH') : Math.round(d.yearAgo).toLocaleString('en-PH')}</td>
-            <td class="neg">\${fmtAmt(d.diffVal, isCount)}</td>
+            <td>\${fmtVal(d.current, metric)}</td>
+            <td>\${fmtVal(d.yearAgo, metric)}</td>
+            <td class="neg">\${fmtAmt(d.diffVal, metric)}</td>
           </tr>\`;
         });
         html += '</tbody></table>';
       }
       if (growers.length > 0) {
         html += '<div class="ctt-section-label" style="color:#2E7D32;">▲ Top Growers</div>';
-        html += '<table><tbody>';
+        html += '<table>' + cols + '<tbody>';
         growers.forEach(g => {
           html += \`<tr>
             <td class="sid">#\${g.storeId}</td>
             <td class="store">\${g.storeName}</td>
-            <td class="pos">\${fmtAmt(g.diffVal, isCount)}</td>
+            <td>\${fmtVal(g.current, metric)}</td>
+            <td>\${fmtVal(g.yearAgo, metric)}</td>
+            <td class="pos">\${fmtAmt(g.diffVal, metric)}</td>
           </tr>\`;
         });
         html += '</tbody></table>';
