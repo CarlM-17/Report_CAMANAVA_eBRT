@@ -1369,7 +1369,14 @@ app.get('/api/data', async (req, res) => {
   const t0 = Date.now();
   try {
     const scope = getUserScope(req);
-    const { area, storeId } = req.query;
+    const { area } = req.query;
+    // Multi-store: accept `storeIds` (comma-separated) or legacy `storeId` (single)
+    const storeIdsRaw = (req.query.storeIds || req.query.storeId || '').toString();
+    const storeIdArr = storeIdsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const storeIdSet = new Set(storeIdArr);
+    const hasStoreFilter = storeIdSet.size > 0;
+    // Preserve legacy `storeId` var for single-select code paths
+    const storeId = storeIdArr.length === 1 ? storeIdArr[0] : null;
     // Multi-month: accept `months` (comma-separated) or single `month`
     const monthsRaw = (req.query.months || req.query.month || '').toString();
     const monthArr = monthsRaw.split(',').map(s => s.trim()).filter(Boolean);
@@ -1576,14 +1583,14 @@ app.get('/api/data', async (req, res) => {
       return MONTH_LOOKUP[k] || null;
     };
 
-    // Sales: when storeId is set, only that store; otherwise respect area+scope
+    // Sales: when storeId(s) is set, only those stores; otherwise respect area+scope
     const monthlySalesIdx = {}; // month -> {sC,sY,tC,tY}
     salesRows.slice(1).forEach(cols => {
       if (!cols[5] || cols[5].trim() === '') return;
       const sid = (cols[3] || '').trim();
       if (!sid) return;
-      if (storeId) {
-        if (sid !== storeId) return;
+      if (hasStoreFilter) {
+        if (!storeIdSet.has(sid)) return;
       } else {
         if (!passArea(sid) || !passStoreScope(sid)) return;
       }
@@ -1605,8 +1612,8 @@ app.get('/api/data', async (req, res) => {
         if (area && rowArea.toLowerCase() !== area.toLowerCase()) return;
         const sid = (cols[1] || '').trim();
         if (!sid) return;
-        if (storeId) {
-          if (sid !== storeId) return;
+        if (hasStoreFilter) {
+          if (!storeIdSet.has(sid)) return;
         } else {
           if (!passStoreScope(sid)) return;
         }
@@ -1658,8 +1665,13 @@ app.get('/api/data', async (req, res) => {
     });
 
     let breakdownTitle = 'Region';
-    if (storeId) breakdownTitle = storeNameMap[storeId] || storeId;
-    else if (area) breakdownTitle = area;
+    if (hasStoreFilter) {
+      if (storeIdArr.length === 1) {
+        breakdownTitle = storeNameMap[storeIdArr[0]] || storeIdArr[0];
+      } else {
+        breakdownTitle = storeIdArr.length + ' Stores';
+      }
+    } else if (area) breakdownTitle = area;
 
     // ----- P3 / P6 / P9 Trend (complete months only; excludes the current calendar month) -----
     // Walk back from last COMPLETE calendar month, picking months that have data.
@@ -1701,6 +1713,7 @@ app.get('/api/data', async (req, res) => {
     function getStoreSet(storeIdFilter) {
       // Build list of store IDs that pass area/storeId filters
       if (storeIdFilter) return [storeIdFilter];
+      if (hasStoreFilter) return storeIdArr.filter(sid => passStoreScope(sid));
       // All stores known (use storeAreaMap keys, filtered by area + user scope)
       return Object.keys(storeAreaMap).filter(sid => passArea(sid) && passStoreScope(sid));
     }
@@ -2211,6 +2224,13 @@ const html = `<!DOCTYPE html>
     color: #1B5E20; cursor: pointer; font-weight: 600;
   }
   .ms-panel .ms-actions button:hover { background: #C8E6C9; }
+  #msStore .ms-panel { min-width: 280px; max-width: 360px; }
+  .ms-panel .ms-search {
+    width: calc(100% - 8px); margin: 2px 4px 6px; padding: 6px 10px;
+    border: 1px solid #d4dad4; border-radius: 6px; font-size: 12px;
+    color: #1a2e1f; outline: none;
+  }
+  .ms-panel .ms-search:focus { border-color: #2E7D32; }
 
   /* STATUS BAR */
   .status-bar {
@@ -3166,7 +3186,10 @@ const html = `<!DOCTYPE html>
     <label>Area</label>
     <select id="areaFilter"><option value="">All Areas</option></select>
     <label>Store</label>
-    <select id="storeFilter"><option value="">All Stores</option></select>
+    <div class="multi-select" id="msStore">
+      <button type="button" class="ms-btn" onclick="toggleMs('msStore')">All Stores ▾</button>
+      <div class="ms-panel" id="msStorePanel"></div>
+    </div>
     <button class="btn-refresh" id="refreshBtn" onclick="loadData()">↻ Refresh</button>
   </div>
 
@@ -4558,11 +4581,11 @@ const html = `<!DOCTYPE html>
       // Build query string from filters
       const months  = getMsValues('msMonth');
       const area    = document.getElementById('areaFilter').value;
-      const storeId = document.getElementById('storeFilter').value;
+      const storeIds = getMsValues('msStore');
       const params  = new URLSearchParams();
       if (months.length) params.set('months', months.join(','));
       if (area)    params.set('area', area);
-      if (storeId) params.set('storeId', storeId);
+      if (storeIds.length) params.set('storeIds', storeIds.join(','));
 
       const res = await fetch('/api/data?' + params.toString());
       const data = await res.json();
@@ -4580,10 +4603,14 @@ const html = `<!DOCTYPE html>
       const monthTxt = mList.length === 0 ? null
                      : mList.length <= 3 ? 'Months: ' + mList.join(', ')
                      : 'Months: ' + mList.length + ' selected';
+      const storeIdsSel = getMsValues('msStore');
+      const storeTxt = storeIdsSel.length === 0 ? null
+                     : storeIdsSel.length === 1 ? 'Store: ' + storeIdsSel[0]
+                     : 'Stores: ' + storeIdsSel.length + ' selected';
       const filterTxt = [
         monthTxt,
-        f.area    ? 'Area: ' + f.area       : null,
-        f.storeId ? 'Store: ' + f.storeId   : null
+        f.area ? 'Area: ' + f.area : null,
+        storeTxt
       ].filter(Boolean).join(' · ') || 'No filters';
       const storeCount = data.perStore ? data.perStore.length : 0;
       statusBar.innerHTML = \`✅ \${filterTxt} · \${data.rowCount} matched rows · \${storeCount} stores in summary · Refreshed \${new Date().toLocaleTimeString('en-PH')}\`;
@@ -4616,6 +4643,9 @@ const html = `<!DOCTYPE html>
     const btn = document.querySelector('#' + id + ' .ms-btn');
     if (!btn) return;
     if (vals.length === 0) btn.textContent = allLabel + ' ▾';
+    else if (id === 'msStore') {
+      btn.textContent = vals.length === 1 ? vals[0] + ' ▾' : vals.length + ' stores ▾';
+    }
     else if (vals.length <= 2) btn.textContent = vals.map(v => v.substring(0,3)).join(', ') + ' ▾';
     else btn.textContent = vals.length + ' selected ▾';
   }
@@ -4624,7 +4654,7 @@ const html = `<!DOCTYPE html>
     if (!panel) return;
     const ms = document.getElementById(id);
     // Pick the right loader based on widget id
-    const onChange = id === 'msMonth' ? loadData
+    const onChange = id === 'msMonth' || id === 'msStore' ? loadData
                    : id === 'psMsMonth' ? loadStorePerf
                    : (id === 'csMsMonth' || id === 'csMsCategory') ? loadCategorySales
                    : id === 'smMsMonth' ? loadShopperMetrics
@@ -4635,9 +4665,29 @@ const html = `<!DOCTYPE html>
         <button type="button" data-act="all">Select All</button>
         <button type="button" data-act="clear">Clear</button>
       </div>\`;
-    const boxes = items.map(it => \`
-      <label><input type="checkbox" value="\${it}"> \${it}</label>\`).join('');
-    panel.innerHTML = actions + boxes;
+    // Optional search input (for long lists like stores)
+    const searchBox = id === 'msStore'
+      ? \`<input type="text" class="ms-search" placeholder="🔍 Search store..." />\`
+      : '';
+    // Items may be plain strings (value===label) or {value, label} objects
+    const boxes = items.map(it => {
+      const v = (it && typeof it === 'object') ? it.value : it;
+      const l = (it && typeof it === 'object') ? it.label : it;
+      return \`<label data-label="\${(l || '').toLowerCase()}"><input type="checkbox" value="\${v}"> \${l}</label>\`;
+    }).join('');
+    panel.innerHTML = actions + searchBox + boxes;
+    // Wire the search input (if present)
+    const searchEl = panel.querySelector('.ms-search');
+    if (searchEl) {
+      searchEl.addEventListener('input', () => {
+        const q = searchEl.value.trim().toLowerCase();
+        panel.querySelectorAll('label[data-label]').forEach(lb => {
+          lb.style.display = (!q || lb.dataset.label.includes(q)) ? '' : 'none';
+        });
+      });
+      // Prevent panel from closing when user clicks the search box
+      searchEl.addEventListener('click', e => e.stopPropagation());
+    }
     // Wire change events
     panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
       cb.addEventListener('change', () => {
@@ -4678,24 +4728,25 @@ const html = `<!DOCTYPE html>
 
       // Auto-apply filters on any change
       areaSel.addEventListener('change', () => { populateStoreDropdown(); loadData(); });
-      document.getElementById('storeFilter').addEventListener('change', loadData);
     } catch (e) {
       console.error('Filter load failed', e);
     }
   }
 
   function populateStoreDropdown() {
-    const areaSel  = document.getElementById('areaFilter').value;
-    const storeSel = document.getElementById('storeFilter');
-    const prev     = storeSel.value;
-    storeSel.innerHTML = '<option value="">All Stores</option>';
+    const areaSel = document.getElementById('areaFilter').value;
+    const prevSelected = new Set(getMsValues('msStore'));
     const filtered = areaSel
       ? allStores.filter(s => s.area.toLowerCase() === areaSel.toLowerCase())
       : allStores;
-    filtered.forEach(s => {
-      storeSel.innerHTML += \`<option value="\${s.storeId}">\${s.storeId} · \${s.name}</option>\`;
+    const items = filtered.map(s => ({ value: s.storeId, label: s.storeId + ' · ' + s.name }));
+    buildMsPanel('msStore', items, 'All Stores');
+    // Restore previously-selected stores if still in the filtered list
+    const panel = document.getElementById('msStorePanel');
+    panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
+      if (prevSelected.has(cb.value)) cb.checked = true;
     });
-    storeSel.value = prev; // preserve selection if still valid
+    updateMsLabel('msStore', 'All Stores');
   }
 
   // ========= PER STORE SALES PERFORMANCE =========
