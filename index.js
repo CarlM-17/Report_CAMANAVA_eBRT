@@ -2434,6 +2434,8 @@ const html = `<!DOCTYPE html>
     background: #FFF9C4 !important;
     outline: 1px solid #FFC107; outline-offset: -1px;
   }
+  tr.ps-row-hover { cursor: pointer; }
+  tr.ps-row-hover:hover td { background: #FFF9C4 !important; }
   #catTooltip {
     position: fixed; z-index: 1000; display: none;
     background: white; border: 1px solid #1B5E20; border-radius: 10px;
@@ -4801,30 +4803,140 @@ const html = `<!DOCTYPE html>
       tt.style.top  = top + 'px';
     }
 
+    // ========= Per-Store tooltip: negative-contribution categories =========
+    // Ordered to mirror the One Page BRT table grouping
+    const PS_CAT_LIST = [
+      { key: 'totalSales',          label: 'Total Sales' },
+      { key: 'totalTnap',           label: 'Total TNAP' },
+      { key: 'tnap',                label: 'TNAP' },
+      { key: 'kain',                label: 'KAIN' },
+      { key: 'apar',                label: 'APAR' },
+      { key: 'top200',              label: 'TOP 200' },
+      { key: 'balanceTnap',         label: 'Balance TNAP' },
+      { key: 'gold',                label: 'Gold' },
+      { key: 'elite',               label: 'Elite' },
+      { key: 'green',               label: 'Green' },
+      { key: 'totalGEG',            label: 'Total GEG' },
+      { key: 'perks',               label: 'PERKS' },
+      { key: 'pagibig',             label: 'PAG-IBIG' },
+      { key: 'uncardedWithUnusual', label: 'UnCarded with Unusual' },
+      { key: 'unusual',             label: 'UnUsual Transaction' },
+      { key: 'totalUncarded',       label: 'Total Uncarded' },
+      { key: 'netOfUnusual',        label: 'Net of Unusual' }
+    ];
+
+    async function ensureBrtData() {
+      if (window._brtData && window._brtData.perStore) return window._brtData;
+      try {
+        const res = await fetch('/api/data');
+        const data = await res.json();
+        if (data && data.ok) window._brtData = data;
+        return window._brtData;
+      } catch (e) { return null; }
+    }
+
+    function buildStoreNegContrib(storeId, storeName) {
+      const data = window._brtData;
+      if (!data || !data.perStore) {
+        tt.innerHTML = '<div class="ctt-empty">Loading data…</div>';
+        return;
+      }
+      const s = data.perStore.find(x => x.storeId === storeId);
+      if (!s) {
+        tt.innerHTML = '<div class="ctt-empty">No breakdown available for this store.</div>';
+        return;
+      }
+      // Collect all categories where SALES diff is negative
+      const negatives = [];
+      PS_CAT_LIST.forEach(c => {
+        const cm = catMetricFor(s.metrics, c.key);
+        if (!cm || !cm.sales) return;
+        const dv = cm.sales.diffVal;
+        if (dv === null || dv === undefined || isNaN(dv) || dv >= 0) return;
+        const ly = cm.sales.yearAgo;
+        const pct = (ly !== 0) ? (dv / Math.abs(ly)) * 100 : null;
+        negatives.push({
+          key: c.key, label: c.label,
+          current: cm.sales.current, yearAgo: ly,
+          diffVal: dv, diffPct: pct
+        });
+      });
+      negatives.sort((a, b) => a.diffVal - b.diffVal); // most-negative first
+
+      let html = \`
+        <div class="ctt-head">
+          <div class="ctt-title">
+            <span>\${storeName} · Sales</span>
+            <span class="ctt-badge">Negative Contributors</span>
+          </div>
+          <div class="ctt-sub">Categories where Current &lt; Year Ago · sorted by biggest drop</div>
+        </div>\`;
+
+      if (negatives.length === 0) {
+        html += '<div class="ctt-empty" style="color:#2E7D32;">✓ All categories are flat or positive for this store.</div>';
+      } else {
+        html += '<div class="ctt-section-label">▼ Negative-Contributing Categories</div>';
+        html += '<div class="ctt-grid" style="grid-template-columns: minmax(130px, 1.4fr) 1fr 1fr 1fr 70px;">';
+        html += \`<div class="ctt-head-row ctt-store">Category</div>
+                 <div class="ctt-head-row">Current</div>
+                 <div class="ctt-head-row">Year Ago</div>
+                 <div class="ctt-head-row">Diff Val</div>
+                 <div class="ctt-head-row">Diff %</div>\`;
+        negatives.forEach(n => {
+          html += \`<div class="ctt-store">\${n.label}</div>
+                   <div>\${fmtVal(n.current, 'sales')}</div>
+                   <div>\${fmtVal(n.yearAgo, 'sales')}</div>
+                   <div class="neg">\${fmtAmt(n.diffVal, 'sales')}</div>
+                   <div class="neg">\${n.diffPct === null ? '—' : (n.diffPct >= 0 ? '+' : '') + n.diffPct.toFixed(2) + '%'}</div>\`;
+        });
+        html += '</div>';
+      }
+      tt.innerHTML = html;
+    }
+
     let activeCell = null;
     document.addEventListener('mouseover', (e) => {
+      // (1) Category-row diff cell on One Page BRT
       const cell = e.target.closest('.cat-hover');
-      if (!cell) return;
-      const tr = cell.closest('tr');
-      if (!tr || !tr.dataset.cat) return;
-      activeCell = cell;
-      const cat = tr.dataset.cat;
-      const metric = cell.dataset.metric;
-      const label = tr.dataset.label || cat;
-      buildTopDecliners(cat, metric, label);
-      tt.style.display = 'block';
-      placeTooltip(e.clientX, e.clientY);
+      if (cell) {
+        const tr = cell.closest('tr');
+        if (!tr || !tr.dataset.cat) return;
+        activeCell = cell;
+        const cat = tr.dataset.cat;
+        const metric = cell.dataset.metric;
+        const label = tr.dataset.label || cat;
+        buildTopDecliners(cat, metric, label);
+        tt.style.display = 'block';
+        placeTooltip(e.clientX, e.clientY);
+        return;
+      }
+      // (2) Per-Store Sales Performance row
+      const psRow = e.target.closest('tr.ps-row-hover');
+      if (psRow && psRow.dataset.storeId) {
+        activeCell = psRow;
+        const sid = psRow.dataset.storeId;
+        const sname = psRow.dataset.storeName || sid;
+        // Render immediately with whatever data we have (may be empty), then refresh once fetched
+        buildStoreNegContrib(sid, sname);
+        tt.style.display = 'block';
+        placeTooltip(e.clientX, e.clientY);
+        ensureBrtData().then(() => {
+          if (activeCell === psRow) buildStoreNegContrib(sid, sname);
+        });
+        return;
+      }
     });
     document.addEventListener('mousemove', (e) => {
       if (!activeCell) return;
       if (tt.style.display === 'block') placeTooltip(e.clientX, e.clientY);
     });
     document.addEventListener('mouseout', (e) => {
-      const cell = e.target.closest('.cat-hover');
-      if (!cell) return;
-      // Hide only when leaving the cell AND not entering another cat-hover cell
-      const to = e.relatedTarget && e.relatedTarget.closest ? e.relatedTarget.closest('.cat-hover') : null;
-      if (to) return;
+      const leftCell = e.target.closest('.cat-hover, tr.ps-row-hover');
+      if (!leftCell) return;
+      const toEl = e.relatedTarget && e.relatedTarget.closest
+        ? e.relatedTarget.closest('.cat-hover, tr.ps-row-hover')
+        : null;
+      if (toEl) return;
       tt.style.display = 'none';
       activeCell = null;
     });
@@ -5264,7 +5376,7 @@ const html = `<!DOCTYPE html>
       const valTgtClass = r.valueVsTarget >= 0 ? 'pos' : 'neg';
       const pctTgtClass = r.pctVsTarget >= 100 ? 'pos' : 'neg';
       const indexClass  = r.index >= 100 ? 'pos' : 'neg';
-      return \`<tr>
+      return \`<tr class="ps-row-hover" data-store-id="\${r.storeId || ''}" data-store-name="\${r.storeName || r.storeId}">
         <td class="store-col">\${r.storeName || r.storeId}</td>
         <td>\${psFmt(r.sales)}</td>
         <td>\${psFmt(r.salesYA)}</td>
