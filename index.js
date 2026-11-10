@@ -2434,8 +2434,11 @@ const html = `<!DOCTYPE html>
     background: #FFF9C4 !important;
     outline: 1px solid #FFC107; outline-offset: -1px;
   }
-  tr.ps-row-hover { cursor: pointer; }
-  tr.ps-row-hover:hover td { background: #FFF9C4 !important; }
+  td.ps-valya-hover { cursor: pointer; }
+  td.ps-valya-hover:hover {
+    background: #FFF9C4 !important;
+    outline: 1px solid #FFC107; outline-offset: -1px;
+  }
   #catTooltip {
     position: fixed; z-index: 1000; display: none;
     background: white; border: 1px solid #1B5E20; border-radius: 10px;
@@ -4861,7 +4864,12 @@ const html = `<!DOCTYPE html>
           diffVal: dv, diffPct: pct
         });
       });
-      negatives.sort((a, b) => a.diffVal - b.diffVal); // most-negative first
+      // Pin Total Sales at the top; sort the rest by most-negative first
+      negatives.sort((a, b) => {
+        if (a.key === 'totalSales') return -1;
+        if (b.key === 'totalSales') return 1;
+        return a.diffVal - b.diffVal;
+      });
 
       let html = \`
         <div class="ctt-head">
@@ -4910,20 +4918,22 @@ const html = `<!DOCTYPE html>
         placeTooltip(e.clientX, e.clientY);
         return;
       }
-      // (2) Per-Store Sales Performance row
-      const psRow = e.target.closest('tr.ps-row-hover');
-      if (psRow && psRow.dataset.storeId) {
-        activeCell = psRow;
-        const sid = psRow.dataset.storeId;
-        const sname = psRow.dataset.storeName || sid;
-        // Render immediately with whatever data we have (may be empty), then refresh once fetched
-        buildStoreNegContrib(sid, sname);
-        tt.style.display = 'block';
-        placeTooltip(e.clientX, e.clientY);
-        ensureBrtData().then(() => {
-          if (activeCell === psRow) buildStoreNegContrib(sid, sname);
-        });
-        return;
+      // (2) Per-Store Sales Performance — only the "Value vs YA" cell
+      const psValYa = e.target.closest('td.ps-valya-hover');
+      if (psValYa) {
+        const psRow = psValYa.closest('tr');
+        if (psRow && psRow.dataset.storeId) {
+          activeCell = psValYa;
+          const sid = psRow.dataset.storeId;
+          const sname = psRow.dataset.storeName || sid;
+          buildStoreNegContrib(sid, sname);
+          tt.style.display = 'block';
+          placeTooltip(e.clientX, e.clientY);
+          ensureBrtData().then(() => {
+            if (activeCell === psValYa) buildStoreNegContrib(sid, sname);
+          });
+          return;
+        }
       }
     });
     document.addEventListener('mousemove', (e) => {
@@ -4931,10 +4941,10 @@ const html = `<!DOCTYPE html>
       if (tt.style.display === 'block') placeTooltip(e.clientX, e.clientY);
     });
     document.addEventListener('mouseout', (e) => {
-      const leftCell = e.target.closest('.cat-hover, tr.ps-row-hover');
+      const leftCell = e.target.closest('.cat-hover, td.ps-valya-hover');
       if (!leftCell) return;
       const toEl = e.relatedTarget && e.relatedTarget.closest
-        ? e.relatedTarget.closest('.cat-hover, tr.ps-row-hover')
+        ? e.relatedTarget.closest('.cat-hover, td.ps-valya-hover')
         : null;
       if (toEl) return;
       tt.style.display = 'none';
@@ -5376,12 +5386,12 @@ const html = `<!DOCTYPE html>
       const valTgtClass = r.valueVsTarget >= 0 ? 'pos' : 'neg';
       const pctTgtClass = r.pctVsTarget >= 100 ? 'pos' : 'neg';
       const indexClass  = r.index >= 100 ? 'pos' : 'neg';
-      return \`<tr class="ps-row-hover" data-store-id="\${r.storeId || ''}" data-store-name="\${r.storeName || r.storeId}">
+      return \`<tr data-store-id="\${r.storeId || ''}" data-store-name="\${r.storeName || r.storeId}">
         <td class="store-col">\${r.storeName || r.storeId}</td>
         <td>\${psFmt(r.sales)}</td>
         <td>\${psFmt(r.salesYA)}</td>
         <td class="\${indexClass}">\${psFmtPct(r.index)}</td>
-        <td class="\${valYAClass}">\${psFmt(r.valueVsYA)}</td>
+        <td class="\${valYAClass} ps-valya-hover">\${psFmt(r.valueVsYA)}</td>
         <td>\${psFmt(r.target)}</td>
         <td class="\${pctTgtClass}">\${psFmtPct(r.pctVsTarget)}</td>
         <td class="\${valTgtClass}">\${psFmt(r.valueVsTarget)}</td>
