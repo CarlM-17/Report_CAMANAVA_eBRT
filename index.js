@@ -2442,8 +2442,6 @@ const html = `<!DOCTYPE html>
     min-width: 520px; max-width: 620px;
     overflow: hidden;
   }
-  #catTooltip table { table-layout: fixed; width: 100%; }
-  #catTooltip th, #catTooltip td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #catTooltip .ctt-head {
     background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 100%);
     color: white; padding: 10px 14px;
@@ -2465,18 +2463,21 @@ const html = `<!DOCTYPE html>
     text-transform: uppercase; letter-spacing: 0.6px;
     padding: 8px 14px 4px;
   }
-  #catTooltip table {
-    width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums;
+  #catTooltip .ctt-grid {
+    display: grid;
+    grid-template-columns: 46px minmax(90px, 1.3fr) 1fr 1fr 1fr;
+    font-variant-numeric: tabular-nums;
   }
-  #catTooltip th, #catTooltip td {
-    padding: 6px 10px; text-align: right; font-size: 11px;
-    border-bottom: 1px solid #f0f2ef;
+  #catTooltip .ctt-grid > div {
+    padding: 6px 10px; font-size: 11px; border-bottom: 1px solid #f0f2ef;
+    text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
   }
-  #catTooltip th { color: #5a6b5e; font-weight: 700; font-size: 9.5px; background: #fafbf9; }
-  #catTooltip td.store { text-align: left; color: #1a2e1f; font-weight: 600; }
-  #catTooltip td.sid { text-align: left; color: #7a8a7d; font-size: 10px; width: 36px; }
-  #catTooltip td.neg { color: #C62828; font-weight: 700; }
-  #catTooltip td.pos { color: #2E7D32; font-weight: 700; }
+  #catTooltip .ctt-grid .ctt-head-row { color: #5a6b5e; font-weight: 700; font-size: 9.5px; background: #fafbf9; }
+  #catTooltip .ctt-grid .ctt-sid   { text-align: left; color: #7a8a7d; font-size: 10px; }
+  #catTooltip .ctt-grid .ctt-store { text-align: left; color: #1a2e1f; font-weight: 600; }
+  #catTooltip .ctt-grid .neg { color: #C62828; font-weight: 700; }
+  #catTooltip .ctt-grid .pos { color: #2E7D32; font-weight: 700; }
   #catTooltip .ctt-empty {
     padding: 14px; text-align: center; color: #8a9a8d; font-size: 11px; font-style: italic;
   }
@@ -4750,47 +4751,39 @@ const html = `<!DOCTYPE html>
           <div class="ctt-sub">Per-store Year-over-Year differences · click outside to dismiss</div>
         </div>\`;
 
-      // Inline widths keep the Current / YA / Diff columns visible regardless of row content.
-      const sidW = 'width:46px;';
-      const stW  = 'width:30%;';
-      const numW = 'width:20%;';
+      const row = (cls, sid, name, cur, ya, diff, diffCls) => \`
+        <div class="ctt-sid">\${sid}</div>
+        <div class="ctt-store">\${name}</div>
+        <div>\${cur}</div>
+        <div>\${ya}</div>
+        <div class="\${diffCls || ''}">\${diff}</div>\`;
 
       if (decliners.length === 0) {
         html += '<div class="ctt-empty">No stores declined for this category.</div>';
       } else {
         html += '<div class="ctt-section-label">▼ Top Declined Stores</div>';
-        html += '<table style="width:100%;table-layout:fixed;">';
-        html += \`<thead><tr>
-          <th style="text-align:left;\${sidW}">ID</th>
-          <th style="text-align:left;\${stW}">Store</th>
-          <th style="\${numW}">Current</th>
-          <th style="\${numW}">Year Ago</th>
-          <th style="\${numW}">Diff Val</th>
-        </tr></thead><tbody>\`;
+        html += '<div class="ctt-grid">';
+        html += \`<div class="ctt-head-row ctt-sid">ID</div>
+                 <div class="ctt-head-row ctt-store">Store</div>
+                 <div class="ctt-head-row">Current</div>
+                 <div class="ctt-head-row">Year Ago</div>
+                 <div class="ctt-head-row">Diff Val</div>\`;
         decliners.forEach(d => {
-          html += \`<tr>
-            <td class="sid" style="\${sidW}">#\${d.storeId}</td>
-            <td class="store" style="\${stW}">\${d.storeName}</td>
-            <td style="\${numW}">\${fmtVal(d.current, metric)}</td>
-            <td style="\${numW}">\${fmtVal(d.yearAgo, metric)}</td>
-            <td class="neg" style="\${numW}">\${fmtAmt(d.diffVal, metric)}</td>
-          </tr>\`;
+          html += row(null, '#'+d.storeId, d.storeName,
+            fmtVal(d.current, metric), fmtVal(d.yearAgo, metric),
+            fmtAmt(d.diffVal, metric), 'neg');
         });
-        html += '</tbody></table>';
+        html += '</div>';
       }
       if (growers.length > 0) {
         html += '<div class="ctt-section-label" style="color:#2E7D32;">▲ Top Growers</div>';
-        html += '<table style="width:100%;table-layout:fixed;"><tbody>';
+        html += '<div class="ctt-grid">';
         growers.forEach(g => {
-          html += \`<tr>
-            <td class="sid" style="\${sidW}">#\${g.storeId}</td>
-            <td class="store" style="\${stW}">\${g.storeName}</td>
-            <td style="\${numW}">\${fmtVal(g.current, metric)}</td>
-            <td style="\${numW}">\${fmtVal(g.yearAgo, metric)}</td>
-            <td class="pos" style="\${numW}">\${fmtAmt(g.diffVal, metric)}</td>
-          </tr>\`;
+          html += row(null, '#'+g.storeId, g.storeName,
+            fmtVal(g.current, metric), fmtVal(g.yearAgo, metric),
+            fmtAmt(g.diffVal, metric), 'pos');
         });
-        html += '</tbody></table>';
+        html += '</div>';
       }
       tt.innerHTML = html;
     }
