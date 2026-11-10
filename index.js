@@ -2442,10 +2442,8 @@ const html = `<!DOCTYPE html>
     min-width: 520px; max-width: 620px;
     overflow: hidden;
   }
-  #catTooltip table { table-layout: fixed; }
-  #catTooltip col.c-sid     { width: 44px; }
-  #catTooltip col.c-store   { width: 32%; }
-  #catTooltip col.c-num     { width: auto; }
+  #catTooltip table { table-layout: fixed; width: 100%; }
+  #catTooltip th, #catTooltip td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #catTooltip .ctt-head {
     background: linear-gradient(135deg, #1B5E20 0%, #2E7D32 100%);
     color: white; padding: 10px 14px;
@@ -4752,38 +4750,44 @@ const html = `<!DOCTYPE html>
           <div class="ctt-sub">Per-store Year-over-Year differences · click outside to dismiss</div>
         </div>\`;
 
-      const cols = \`<colgroup>
-        <col class="c-sid"/><col class="c-store"/>
-        <col class="c-num"/><col class="c-num"/><col class="c-num"/>
-      </colgroup>\`;
+      // Inline widths keep the Current / YA / Diff columns visible regardless of row content.
+      const sidW = 'width:46px;';
+      const stW  = 'width:30%;';
+      const numW = 'width:20%;';
 
       if (decliners.length === 0) {
         html += '<div class="ctt-empty">No stores declined for this category.</div>';
       } else {
         html += '<div class="ctt-section-label">▼ Top Declined Stores</div>';
-        html += '<table>' + cols +
-          '<thead><tr><th colspan="2" style="text-align:left;">Store</th><th>Current</th><th>Year Ago</th><th>Diff Val</th></tr></thead><tbody>';
+        html += '<table style="width:100%;table-layout:fixed;">';
+        html += \`<thead><tr>
+          <th style="text-align:left;\${sidW}">ID</th>
+          <th style="text-align:left;\${stW}">Store</th>
+          <th style="\${numW}">Current</th>
+          <th style="\${numW}">Year Ago</th>
+          <th style="\${numW}">Diff Val</th>
+        </tr></thead><tbody>\`;
         decliners.forEach(d => {
           html += \`<tr>
-            <td class="sid">#\${d.storeId}</td>
-            <td class="store">\${d.storeName}</td>
-            <td>\${fmtVal(d.current, metric)}</td>
-            <td>\${fmtVal(d.yearAgo, metric)}</td>
-            <td class="neg">\${fmtAmt(d.diffVal, metric)}</td>
+            <td class="sid" style="\${sidW}">#\${d.storeId}</td>
+            <td class="store" style="\${stW}">\${d.storeName}</td>
+            <td style="\${numW}">\${fmtVal(d.current, metric)}</td>
+            <td style="\${numW}">\${fmtVal(d.yearAgo, metric)}</td>
+            <td class="neg" style="\${numW}">\${fmtAmt(d.diffVal, metric)}</td>
           </tr>\`;
         });
         html += '</tbody></table>';
       }
       if (growers.length > 0) {
         html += '<div class="ctt-section-label" style="color:#2E7D32;">▲ Top Growers</div>';
-        html += '<table>' + cols + '<tbody>';
+        html += '<table style="width:100%;table-layout:fixed;"><tbody>';
         growers.forEach(g => {
           html += \`<tr>
-            <td class="sid">#\${g.storeId}</td>
-            <td class="store">\${g.storeName}</td>
-            <td>\${fmtVal(g.current, metric)}</td>
-            <td>\${fmtVal(g.yearAgo, metric)}</td>
-            <td class="pos">\${fmtAmt(g.diffVal, metric)}</td>
+            <td class="sid" style="\${sidW}">#\${g.storeId}</td>
+            <td class="store" style="\${stW}">\${g.storeName}</td>
+            <td style="\${numW}">\${fmtVal(g.current, metric)}</td>
+            <td style="\${numW}">\${fmtVal(g.yearAgo, metric)}</td>
+            <td class="pos" style="\${numW}">\${fmtAmt(g.diffVal, metric)}</td>
           </tr>\`;
         });
         html += '</tbody></table>';
